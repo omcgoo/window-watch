@@ -32,13 +32,9 @@ jobs:
 
       - name: Check temperatures
         env:
-          LAT: ${{ vars.LAT }}
-          LON: ${{ vars.LON }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          VAILLANT_USER: ${{ secrets.VAILLANT_USER }}
-          VAILLANT_PASS: ${{ secrets.VAILLANT_PASS }}
-          VAILLANT_COUNTRY: unitedkingdom
-          INDOOR_FALLBACK: "22"
+          CLOSE_ABOVE: ${{ vars.CLOSE_ABOVE }}
+          OPEN_BELOW: ${{ vars.OPEN_BELOW }}
         run: python window_watch.py
 
       - name: Save state

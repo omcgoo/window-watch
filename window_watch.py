@@ -2,26 +2,23 @@
 """
 Window Watch — buzz your phone when it's time to close (or reopen) the windows.
 
-Logic: compare outdoor air temp (Open-Meteo) with your indoor temp (myVAILLANT).
-- Outdoor >= indoor            -> "close"  (shut windows/doors/blinds to hold the cool)
-- Outdoor <= indoor - HYST     -> "open"   (outside is cooler again, let air through)
-- in between                   -> hold the previous state (hysteresis, stops flapping)
+Logic: fixed outdoor temperature thresholds.
+- Outdoor >= CLOSE_ABOVE  -> "close"  (shut windows/doors/blinds to hold the cool)
+- Outdoor <= OPEN_BELOW   -> "open"   (outside is cool enough, let air through)
+- in between              -> hold the previous state (hysteresis, stops flapping)
 
-Sends an ntfy.sh push only when the state *changes*, so you get one buzz to close up
-in the morning and one to reopen in the evening — not every 30 minutes.
+Sends an ntfy.sh push only when the state *changes*.
 
-Config via environment variables (see README):
-  LAT, LON                     location (defaults to Tower Hamlets)
-  NTFY_TOPIC                   your private ntfy topic (REQUIRED)
-  VAILLANT_USER, VAILLANT_PASS myVAILLANT login (omit to use INDOOR_FALLBACK)
-  VAILLANT_BRAND               default "vaillant"
-  VAILLANT_COUNTRY             default "unitedkingdom"
-  INDOOR_FALLBACK              indoor °C to use if Vaillant is unset/unreachable
-  HYSTERESIS                   °C band, default 1.5
-  STATE_FILE                   path to persist last state, default ./state.json
+Config via environment variables:
+  LAT, LON          location (defaults to Bow, E3)
+  WEATHER_MODEL     Open-Meteo model, default icon_d2 (2km resolution)
+  CLOSE_ABOVE       °C at which to close up, default 22
+  OPEN_BELOW        °C at which to reopen, default 20
+  NTFY_TOPIC        your private ntfy topic (REQUIRED)
+  NTFY_SERVER       default https://ntfy.sh
+  STATE_FILE        path to persist last state, default ./state.json
 """
 
-import asyncio
 import json
 import os
 import sys
@@ -31,11 +28,11 @@ import urllib.request
 LAT = os.getenv("LAT") or "51.527"
 LON = os.getenv("LON") or "-0.021"
 WEATHER_MODEL = os.getenv("WEATHER_MODEL") or "icon_d2"
+CLOSE_ABOVE = float(os.getenv("CLOSE_ABOVE") or "22")
+OPEN_BELOW = float(os.getenv("OPEN_BELOW") or "20")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
-HYST = float(os.getenv("HYSTERESIS", "1.5"))
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
-INDOOR_FALLBACK = os.getenv("INDOOR_FALLBACK")
 
 
 def get_outdoor():
@@ -49,51 +46,12 @@ def get_outdoor():
     return float(data["current"]["temperature_2m"])
 
 
-async def get_indoor_vaillant():
-    """Read current room temperature from the first myVAILLANT zone."""
-    user = os.getenv("VAILLANT_USER")
-    pw = os.getenv("VAILLANT_PASS")
-    if not (user and pw):
-        return None
-    from myPyllant.api import MyPyllantAPI
-
-    brand = os.getenv("VAILLANT_BRAND", "vaillant")
-    country = os.getenv("VAILLANT_COUNTRY", "unitedkingdom")
-    async with MyPyllantAPI(user, pw, brand, country) as api:
-        async for system in api.get_systems():
-            for zone in getattr(system, "zones", []):
-                # primary attribute name in the myPyllant data model
-                t = getattr(zone, "current_room_temperature", None)
-                if t is not None:
-                    return float(t)
-                # defensive fallback: scan for any room-temp-like attribute
-                for attr in dir(zone):
-                    if "room_temperature" in attr and "current" in attr:
-                        v = getattr(zone, attr, None)
-                        if isinstance(v, (int, float)):
-                            return float(v)
-    return None
-
-
-def get_indoor():
-    indoor = None
-    try:
-        indoor = asyncio.run(get_indoor_vaillant())
-    except Exception as e:
-        import traceback
-        print(f"[warn] Vaillant read failed: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-    if indoor is None and INDOOR_FALLBACK:
-        indoor = float(INDOOR_FALLBACK)
-    return indoor
-
-
-def decide(outdoor, indoor, last):
-    if outdoor >= indoor:
+def decide(outdoor, last):
+    if outdoor >= CLOSE_ABOVE:
         return "close"
-    if outdoor <= indoor - HYST:
+    if outdoor <= OPEN_BELOW:
         return "open"
-    return last or "open"  # inside the band: hold previous
+    return last or "open"
 
 
 def load_state():
@@ -127,26 +85,22 @@ def main():
         sys.exit("Set NTFY_TOPIC (your private ntfy topic name).")
 
     outdoor = get_outdoor()
-    indoor = get_indoor()
-    if indoor is None:
-        sys.exit("No indoor temperature available (Vaillant unreachable and no INDOOR_FALLBACK).")
-
     last = load_state()
-    status = decide(outdoor, indoor, last)
-    print(f"outdoor={outdoor:.1f}  indoor={indoor:.1f}  last={last}  -> {status}")
+    status = decide(outdoor, last)
+    print(f"outdoor={outdoor:.1f}  close_above={CLOSE_ABOVE}  open_below={OPEN_BELOW}  last={last}  -> {status}")
 
     if status != last:
         if last is None:
             notify(
                 "Window Watch running",
-                f"Started. Outside {outdoor:.1f}°C, inside {indoor:.1f}°C. "
+                f"Started. Outside {outdoor:.1f}°C (close above {CLOSE_ABOVE:.0f}°C, open below {OPEN_BELOW:.0f}°C). "
                 f"Windows should be: {status}.",
                 tags="house,white_check_mark",
             )
         elif status == "close":
             notify(
                 "Close up now",
-                f"Outside {outdoor:.1f}°C is now above inside {indoor:.1f}°C. "
+                f"Outside is {outdoor:.1f}°C — above your {CLOSE_ABOVE:.0f}°C threshold. "
                 "Shut windows, doors and sun-side blinds.",
                 tags="house,sunny",
                 priority="high",
@@ -154,7 +108,7 @@ def main():
         elif status == "open":
             notify(
                 "Open up",
-                f"Outside {outdoor:.1f}°C has dropped below inside {indoor:.1f}°C. "
+                f"Outside is {outdoor:.1f}°C — below your {OPEN_BELOW:.0f}°C threshold. "
                 "Open windows to flush the heat out.",
                 tags="house,leaves",
             )
