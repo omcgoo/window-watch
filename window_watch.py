@@ -184,6 +184,15 @@ def fmt_hour(h):
     return f"{h - 12}pm"
 
 
+def fmt_hour_approx(h):
+    """Round to nearest 2-hour slot — for forecast display where precision implies false accuracy."""
+    r = round(h / 2) * 2
+    if r == 0 or r == 24: return "midnight"
+    if r < 12:  return f"{r}am"
+    if r == 12: return "noon"
+    return f"{r - 12}pm"
+
+
 def daily_summary(outdoor):
     try:
         forecast = get_forecast()
@@ -208,13 +217,13 @@ def daily_summary(outdoor):
     print(f"daily summary: max={max_temp:.1f}°C at {fmt_hour(max_hour)}  close={close_hour}  open={open_hour}")
 
     if close_hour is not None:
-        title = f"Close before {fmt_hour(close_hour)}"
+        title = f"Close before {fmt_hour_approx(close_hour)}"
         if open_hour is not None:
-            title += f" · open after {fmt_hour(open_hour)}"
+            title += f" · open after {fmt_hour_approx(open_hour)}"
         body = (
             f"Peak {max_temp:.0f}°C around {fmt_hour(max_hour)}. "
-            f"Shut windows before {fmt_hour(close_hour)}"
-            + (f" and open up again after {fmt_hour(open_hour)}." if open_hour else " — may stay hot into the evening.")
+            f"Shut windows before {fmt_hour_approx(close_hour)}"
+            + (f" and open up again after {fmt_hour_approx(open_hour)}." if open_hour else " — may stay hot into the evening.")
         )
         notify(title, body, tags="house,sunny", priority="high")
     elif max_temp >= INDOOR_BASE + 3:

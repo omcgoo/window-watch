@@ -198,6 +198,15 @@
       return `${h - 12}pm`
     }
 
+    function fmtHourApprox(h) {
+      if (h == null) return "?"
+      const r = Math.round(h / 2) * 2
+      if (r === 0 || r === 24) return "midnight"
+      if (r < 12)  return `${r}am`
+      if (r === 12) return "noon"
+      return `${r - 12}pm`
+    }
+
     function timeAgo(utcString) {
       if (!utcString) return "never updated"
       const diff = Math.floor((Date.now() - new Date(utcString).getTime()) / 60000)
@@ -276,11 +285,11 @@
       if (closeFuture) {
         fc.style.display = ""
         fc.className = "forecast warn"
-        let html = `Close before <strong>${fmtHour(d.forecast_close_hour)}</strong>`
+        let html = `Close before <strong>${fmtHourApprox(d.forecast_close_hour)}</strong>`
         if (openFuture) {
-          html += ` · open after <strong>${fmtHour(d.forecast_open_hour)}</strong>`
+          html += ` · open after <strong>${fmtHourApprox(d.forecast_open_hour)}</strong>`
         } else if (d.forecast_open_hour != null) {
-          html += ` · open up from <strong>${fmtHour(d.forecast_open_hour)}</strong>`
+          html += ` · open up from <strong>${fmtHourApprox(d.forecast_open_hour)}</strong>`
         } else {
           html += ` · may stay hot overnight`
         }
@@ -288,7 +297,7 @@
       } else if (openFuture) {
         fc.style.display = ""
         fc.className = "forecast"
-        fc.innerHTML = `Open after <strong>${fmtHour(d.forecast_open_hour)}</strong>` + peakLine
+        fc.innerHTML = `Open after <strong>${fmtHourApprox(d.forecast_open_hour)}</strong>` + peakLine
       } else if (d.forecast_close_hour != null && d.forecast_open_hour == null && d.status === "close") {
         fc.style.display = ""
         fc.className = "forecast"

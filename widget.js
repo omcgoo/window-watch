@@ -33,6 +33,15 @@ function fmtHour(h) {
   return `${h - 12}pm`
 }
 
+function fmtHourApprox(h) {
+  if (h == null) return "?"
+  const r = Math.round(h / 2) * 2
+  if (r === 0 || r === 24) return "midnight"
+  if (r < 12)  return `${r}am`
+  if (r === 12) return "noon"
+  return `${r - 12}pm`
+}
+
 function timeAgo(utcString) {
   if (!utcString) return "never"
   const diff = Math.floor((Date.now() - new Date(utcString).getTime()) / 60000)
@@ -113,12 +122,12 @@ const closeFuture = data?.forecast_close_hour != null && data.forecast_close_hou
 const openFuture = data?.forecast_open_hour != null && data.forecast_open_hour >= nowHour
 let fcLine = null
 if (closeFuture) {
-  fcLine = `Close before ${fmtHour(data.forecast_close_hour)}`
+  fcLine = `Close before ${fmtHourApprox(data.forecast_close_hour)}`
   if (data.forecast_open_hour != null) {
-    fcLine += ` · open after ${fmtHour(data.forecast_open_hour)}`
+    fcLine += ` · open after ${fmtHourApprox(data.forecast_open_hour)}`
   }
 } else if (openFuture) {
-  fcLine = `Open after ${fmtHour(data.forecast_open_hour)}`
+  fcLine = `Open after ${fmtHourApprox(data.forecast_open_hour)}`
 }
 if (fcLine) {
   const fcText = right.addText(fcLine)
