@@ -8,6 +8,7 @@ Logic: fixed outdoor temperature thresholds.
 - in between              -> hold the previous state (hysteresis, stops flapping)
 
 Sends an ntfy.sh push only when the state *changes*.
+Updates a public Gist with current status for the dashboard widget.
 
 Config via environment variables:
   LAT, LON          location (defaults to Bow, E3)
@@ -16,6 +17,7 @@ Config via environment variables:
   OPEN_BELOW        °C at which to reopen, default 20
   NTFY_TOPIC        your private ntfy topic (REQUIRED)
   NTFY_SERVER       default https://ntfy.sh
+  GITHUB_TOKEN      if set, updates the dashboard Gist
   STATE_FILE        path to persist last state, default ./state.json
 """
 
@@ -24,6 +26,7 @@ import os
 import sys
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 LAT = os.getenv("LAT") or "51.527"
 LON = os.getenv("LON") or "-0.021"
@@ -33,6 +36,7 @@ OPEN_BELOW = float(os.getenv("OPEN_BELOW") or "20")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
+DASHBOARD_GIST_ID = "bd24c63bd7e129c86942db6ed67f9008"
 
 
 def get_outdoor():
@@ -80,6 +84,39 @@ def notify(title, body, tags, priority="default"):
         r.read()
 
 
+def update_dashboard(outdoor, status):
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        return
+    payload = json.dumps({
+        "files": {
+            "window-watch-status.json": {
+                "content": json.dumps({
+                    "status": status,
+                    "outdoor_c": outdoor,
+                    "close_above_c": CLOSE_ABOVE,
+                    "open_below_c": OPEN_BELOW,
+                    "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }, indent=2)
+            }
+        }
+    })
+    req = urllib.request.Request(
+        f"https://api.github.com/gists/{DASHBOARD_GIST_ID}",
+        data=payload.encode(),
+        method="PATCH",
+    )
+    req.add_header("Authorization", f"token {token}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            r.read()
+        print("Dashboard updated.")
+    except Exception as e:
+        print(f"[warn] Dashboard update failed: {e}", file=sys.stderr)
+
+
 def main():
     if not NTFY_TOPIC:
         sys.exit("Set NTFY_TOPIC (your private ntfy topic name).")
@@ -112,7 +149,9 @@ def main():
                 "Open windows to flush the heat out.",
                 tags="house,leaves",
             )
+
     save_state(status)
+    update_dashboard(outdoor, status)
 
 
 if __name__ == "__main__":

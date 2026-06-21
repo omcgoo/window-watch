@@ -35,6 +35,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           CLOSE_ABOVE: ${{ vars.CLOSE_ABOVE }}
           OPEN_BELOW: ${{ vars.OPEN_BELOW }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python window_watch.py
 
       - name: Save state
