@@ -2,8 +2,14 @@ name: window-watch
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 min (UTC). GitHub may delay during busy periods.
-  workflow_dispatch: {}        # lets you run it manually to test
+    - cron: "*/30 * * * *"   # every 30 min — state-change alerts
+    - cron: "10 7 * * *"     # 8:10am BST (7:10 UTC) — morning forecast brief
+  workflow_dispatch:
+    inputs:
+      daily_summary:
+        description: 'Send daily summary instead of state check'
+        type: boolean
+        default: false
 
 # Avoid overlapping runs
 concurrency:
@@ -36,6 +42,7 @@ jobs:
           CLOSE_ABOVE: ${{ vars.CLOSE_ABOVE }}
           OPEN_BELOW: ${{ vars.OPEN_BELOW }}
           GITHUB_TOKEN: ${{ secrets.GIST_TOKEN }}
+          DAILY_SUMMARY: ${{ github.event.schedule == '10 7 * * *' || inputs.daily_summary == true }}
         run: python window_watch.py
 
       - name: Save state

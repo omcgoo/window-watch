@@ -8,17 +8,19 @@ Logic: fixed outdoor temperature thresholds.
 - in between              -> hold the previous state (hysteresis, stops flapping)
 
 Sends an ntfy.sh push only when the state *changes*.
+At 8:10am BST (DAILY_SUMMARY=true) sends a morning forecast brief.
 Updates a public Gist with current status for the dashboard widget.
 
 Config via environment variables:
-  LAT, LON          location (defaults to Bow, E3)
-  WEATHER_MODEL     Open-Meteo model, default icon_d2 (2km resolution)
-  CLOSE_ABOVE       °C at which to close up, default 22
-  OPEN_BELOW        °C at which to reopen, default 20
-  NTFY_TOPIC        your private ntfy topic (REQUIRED)
-  NTFY_SERVER       default https://ntfy.sh
-  GITHUB_TOKEN      if set, updates the dashboard Gist
-  STATE_FILE        path to persist last state, default ./state.json
+  LAT, LON            location (defaults to Bow, E3)
+  WEATHER_MODEL       Open-Meteo model, default icon_d2 (2km resolution)
+  CLOSE_ABOVE         °C at which to close up, default 25
+  OPEN_BELOW          °C at which to reopen, default 23
+  NTFY_TOPIC          your private ntfy topic (REQUIRED)
+  NTFY_SERVER         default https://ntfy.sh
+  GITHUB_TOKEN        if set, updates the dashboard Gist
+  DAILY_SUMMARY       if "true", sends morning forecast instead of state-change check
+  STATE_FILE          path to persist last state, default ./state.json
 """
 
 import json
@@ -48,6 +50,21 @@ def get_outdoor():
     with urllib.request.urlopen(url, timeout=20) as r:
         data = json.load(r)
     return float(data["current"]["temperature_2m"])
+
+
+def get_forecast():
+    """Return list of (hour_int, temp_float) for today in Europe/London time."""
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={LAT}&longitude={LON}"
+        f"&hourly=temperature_2m&temperature_unit=celsius&models={WEATHER_MODEL}"
+        f"&forecast_days=1&timezone=Europe%2FLondon"
+    )
+    with urllib.request.urlopen(url, timeout=20) as r:
+        data = json.load(r)
+    times = data["hourly"]["time"]   # e.g. "2026-06-21T14:00"
+    temps = data["hourly"]["temperature_2m"]
+    return [(int(t.split("T")[1][:2]), float(temp)) for t, temp in zip(times, temps)]
 
 
 def decide(outdoor, last):
@@ -117,11 +134,61 @@ def update_dashboard(outdoor, status):
         print(f"[warn] Dashboard update failed: {e}", file=sys.stderr)
 
 
+def fmt_hour(h):
+    if h == 0:   return "midnight"
+    if h < 12:   return f"{h}am"
+    if h == 12:  return "noon"
+    return f"{h - 12}pm"
+
+
+def daily_summary(outdoor):
+    try:
+        forecast = get_forecast()
+    except Exception as e:
+        print(f"[warn] Forecast fetch failed: {e}", file=sys.stderr)
+        return
+
+    max_temp = max(t for _, t in forecast)
+    max_hour = next(h for h, t in forecast if t == max_temp)
+    # First hour today where it crosses CLOSE_ABOVE (if any)
+    close_hour = next((h for h, t in forecast if t >= CLOSE_ABOVE), None)
+
+    print(f"daily summary: max={max_temp:.1f}°C at {fmt_hour(max_hour)}  close_hour={close_hour}")
+
+    if close_hour is not None:
+        notify(
+            "Close up before " + fmt_hour(close_hour),
+            f"Peak of {max_temp:.0f}°C expected around {fmt_hour(max_hour)}. "
+            f"Currently {outdoor:.1f}°C — shut windows before {fmt_hour(close_hour)}.",
+            tags="house,sunny",
+            priority="high",
+        )
+    elif max_temp >= OPEN_BELOW:
+        notify(
+            "Warmish day — watch the temp",
+            f"Max {max_temp:.0f}°C today (threshold is {CLOSE_ABOVE:.0f}°C). "
+            f"Currently {outdoor:.1f}°C — should stay manageable.",
+            tags="house,thermometer",
+        )
+    else:
+        notify(
+            "Cool day — windows fine",
+            f"Max only {max_temp:.0f}°C today. "
+            f"Currently {outdoor:.1f}°C — no need to close up.",
+            tags="house,leaves",
+        )
+
+
 def main():
     if not NTFY_TOPIC:
         sys.exit("Set NTFY_TOPIC (your private ntfy topic name).")
 
     outdoor = get_outdoor()
+
+    if os.getenv("DAILY_SUMMARY") == "true":
+        daily_summary(outdoor)
+        return
+
     last = load_state()
     status = decide(outdoor, last)
     print(f"outdoor={outdoor:.1f}  close_above={CLOSE_ABOVE}  open_below={OPEN_BELOW}  last={last}  -> {status}")
