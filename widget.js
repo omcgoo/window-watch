@@ -44,6 +44,9 @@ function timeAgo(utcString) {
 async function fetchStatus() {
   try {
     const req = new Request(GIST_API_URL)
+    req.headers = {
+      "User-Agent": "Scriptable-Window-Watch"
+    }
     const res = await req.loadJSON()
     return JSON.parse(res.files["window-watch-status.json"].content)
   } catch (e) {
