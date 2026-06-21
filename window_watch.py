@@ -101,7 +101,7 @@ def notify(title, body, tags, priority="default"):
         r.read()
 
 
-def update_dashboard(outdoor, status):
+def update_dashboard(outdoor, status, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -113,6 +113,9 @@ def update_dashboard(outdoor, status):
                     "outdoor_c": outdoor,
                     "close_above_c": CLOSE_ABOVE,
                     "open_below_c": OPEN_BELOW,
+                    "forecast_max_c": forecast_max,
+                    "forecast_peak_hour": forecast_peak_hour,
+                    "forecast_close_hour": forecast_close_hour,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -185,8 +188,19 @@ def main():
 
     outdoor = get_outdoor()
 
+    # Fetch today's forecast for dashboard + daily summary
+    forecast_max = forecast_peak_hour = forecast_close_hour = None
+    try:
+        forecast = get_forecast()
+        forecast_max = max(t for _, t in forecast)
+        forecast_peak_hour = next(h for h, t in forecast if t == forecast_max)
+        forecast_close_hour = next((h for h, t in forecast if t >= CLOSE_ABOVE), None)
+    except Exception as e:
+        print(f"[warn] Forecast fetch failed: {e}", file=sys.stderr)
+
     if os.getenv("DAILY_SUMMARY") == "true":
         daily_summary(outdoor)
+        update_dashboard(outdoor, load_state() or "open", forecast_max, forecast_peak_hour, forecast_close_hour)
         return
 
     last = load_state()
@@ -218,7 +232,7 @@ def main():
             )
 
     save_state(status)
-    update_dashboard(outdoor, status)
+    update_dashboard(outdoor, status, forecast_max, forecast_peak_hour, forecast_close_hour)
 
 
 if __name__ == "__main__":

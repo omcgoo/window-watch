@@ -18,8 +18,8 @@
       padding: 24px;
     }
 
-    body.open  { background: #0f3460; color: #e0f0ff; }
-    body.close { background: #7b1e1e; color: #ffe8e8; }
+    body.open    { background: #0f3460; color: #e0f0ff; }
+    body.close   { background: #7b1e1e; color: #ffe8e8; }
     body.unknown { background: #1a1a2e; color: #aaa; }
 
     .card {
@@ -40,7 +40,6 @@
       font-size: 16px;
       opacity: 0.6;
       margin-bottom: 40px;
-      text-transform: lowercase;
     }
 
     .temp {
@@ -54,9 +53,23 @@
 
     .thresholds {
       font-size: 13px;
-      opacity: 0.45;
-      margin-bottom: 48px;
+      opacity: 0.35;
+      margin-bottom: 32px;
     }
+
+    .forecast {
+      font-size: 15px;
+      opacity: 0.75;
+      margin-bottom: 8px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.08);
+      line-height: 1.5;
+      margin-bottom: 32px;
+    }
+
+    .forecast strong { opacity: 1; }
+    .forecast.warn { background: rgba(255,200,0,0.12); }
 
     .updated {
       font-size: 12px;
@@ -65,7 +78,7 @@
 
     .dot {
       display: inline-block;
-      width: 8px; height: 8px;
+      width: 7px; height: 7px;
       border-radius: 50%;
       background: currentColor;
       margin-right: 6px;
@@ -74,8 +87,8 @@
     }
 
     @keyframes pulse {
-      0%, 100% { opacity: 0.35; }
-      50% { opacity: 1; }
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 0.9; }
     }
   </style>
 </head>
@@ -85,6 +98,7 @@
     <div class="hint" id="hint">loading…</div>
     <div class="temp" id="temp">—<span>°C</span></div>
     <div class="thresholds" id="thresholds"></div>
+    <div class="forecast" id="forecast" style="display:none"></div>
     <div class="updated"><span class="dot"></span><span id="updated">checking…</span></div>
   </div>
 
@@ -95,6 +109,13 @@
       open:    { label: "OPEN",  hint: "let the air through" },
       close:   { label: "CLOSE", hint: "hold the cool in" },
       unknown: { label: "—",     hint: "waiting for data" },
+    }
+
+    function fmtHour(h) {
+      if (h === 0)  return "midnight"
+      if (h < 12)  return `${h}am`
+      if (h === 12) return "noon"
+      return `${h - 12}pm`
     }
 
     function timeAgo(utcString) {
@@ -121,6 +142,23 @@
         document.getElementById("thresholds").textContent = d.close_above_c != null
           ? `Close above ${d.close_above_c}° · Open below ${d.open_below_c}°`
           : ""
+
+        // Forecast block
+        const fc = document.getElementById("forecast")
+        if (d.forecast_max_c != null) {
+          fc.style.display = ""
+          const peak = `peaks at <strong>${d.forecast_max_c.toFixed(0)}°C</strong> around ${fmtHour(d.forecast_peak_hour)}`
+          if (d.forecast_close_hour != null) {
+            fc.className = "forecast warn"
+            fc.innerHTML = `Today ${peak} — close up before <strong>${fmtHour(d.forecast_close_hour)}</strong>`
+          } else {
+            fc.className = "forecast"
+            fc.innerHTML = `Today ${peak} — should stay manageable`
+          }
+        } else {
+          fc.style.display = "none"
+        }
+
         document.getElementById("updated").textContent = timeAgo(d.updated_utc)
       } catch(e) {
         document.getElementById("hint").textContent = "couldn't load data"
@@ -129,10 +167,7 @@
 
     load()
     setInterval(load, 30 * 60 * 1000)
-    setInterval(() => {
-      const el = document.getElementById("updated")
-      if (el && !el.textContent.includes("checking")) load()
-    }, 60000)
+    setInterval(() => load(), 60000)
   </script>
 </body>
 </html>
