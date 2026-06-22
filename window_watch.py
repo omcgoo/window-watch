@@ -59,11 +59,23 @@ def get_outdoor():
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={LAT}&longitude={LON}"
-        f"&current=temperature_2m&temperature_unit=celsius&models={WEATHER_MODEL}"
+        "&current=temperature_2m,relative_humidity_2m,apparent_temperature"
+        ",wind_speed_10m,wind_gusts_10m,shortwave_radiation,precipitation,cloud_cover"
+        f"&temperature_unit=celsius&wind_speed_unit=kmh&models={WEATHER_MODEL}"
     )
     with urllib.request.urlopen(url, timeout=20) as r:
         data = json.load(r)
-    return float(data["current"]["temperature_2m"])
+    c = data["current"]
+    return {
+        "temp":       float(c["temperature_2m"]),
+        "feels_like": float(c["apparent_temperature"]),
+        "humidity":   int(c["relative_humidity_2m"]),
+        "wind_kmh":   float(c["wind_speed_10m"]),
+        "gusts_kmh":  float(c["wind_gusts_10m"]),
+        "solar_wm2":  float(c["shortwave_radiation"]),
+        "precip_mm":  float(c["precipitation"]),
+        "cloud_pct":  int(c["cloud_cover"]),
+    }
 
 
 def get_forecast():
@@ -111,7 +123,7 @@ def estimate_indoor(forecast):
 
 
 def get_indoor_shelly():
-    """Return live indoor temp from Shelly Cloud API, or None on failure."""
+    """Return live indoor readings from Shelly Cloud API, or None on failure."""
     if not (SHELLY_AUTH_KEY and SHELLY_DEVICE_ID and SHELLY_SERVER):
         return None
     url = f"https://{SHELLY_SERVER}/device/status"
@@ -122,7 +134,12 @@ def get_indoor_shelly():
             resp = json.load(r)
         if not resp.get("isok"):
             return None
-        return float(resp["data"]["device_status"]["temperature:0"]["tC"])
+        s = resp["data"]["device_status"]
+        return {
+            "temp":     float(s["temperature:0"]["tC"]),
+            "humidity": float(s["humidity:0"]["rh"]),
+            "battery":  int(s["devicepower:0"]["battery"]["percent"]),
+        }
     except Exception as e:
         print(f"[warn] Shelly fetch failed: {e}", file=sys.stderr)
         return None
@@ -199,7 +216,13 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
         print(f"[warn] Dashboard update failed: {e}", file=sys.stderr)
 
 
-def log_history(outdoor, indoor, status):
+HISTORY_HEADER = (
+    "timestamp,outdoor_c,feels_like_c,outdoor_humidity_pct,"
+    "wind_kmh,gusts_kmh,solar_wm2,cloud_pct,precip_mm,"
+    "indoor_c,indoor_humidity_pct,battery_pct,status\n"
+)
+
+def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status):
     """Append a CSV row to the history file in the dashboard Gist."""
     token = os.getenv("GITHUB_TOKEN")
     if not token:
@@ -211,10 +234,26 @@ def log_history(outdoor, indoor, status):
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             gist = json.load(r)
-        existing = gist["files"].get("window-watch-history.csv", {}).get("content", "timestamp,outdoor_c,indoor_c,status\n")
+        existing = gist["files"].get("window-watch-history.csv", {}).get("content", HISTORY_HEADER)
+        if not existing.startswith("timestamp"):
+            existing = HISTORY_HEADER
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        new_content = existing + f"{ts},{outdoor},{indoor},{status}\n"
-        payload = json.dumps({"files": {"window-watch-history.csv": {"content": new_content}}})
+        row = (
+            f"{ts},"
+            f"{outdoor_data['temp']},"
+            f"{outdoor_data['feels_like']},"
+            f"{outdoor_data['humidity']},"
+            f"{outdoor_data['wind_kmh']},"
+            f"{outdoor_data['gusts_kmh']},"
+            f"{outdoor_data['solar_wm2']},"
+            f"{outdoor_data['cloud_pct']},"
+            f"{outdoor_data['precip_mm']},"
+            f"{indoor_c},"
+            f"{indoor_humidity if indoor_humidity is not None else ''},"
+            f"{battery_pct if battery_pct is not None else ''},"
+            f"{status}\n"
+        )
+        payload = json.dumps({"files": {"window-watch-history.csv": {"content": existing + row}}})
         patch = urllib.request.Request(base, data=payload.encode(), method="PATCH")
         patch.add_header("Authorization", f"token {token}")
         patch.add_header("Accept", "application/vnd.github+json")
@@ -294,7 +333,12 @@ def main():
     if not NTFY_TOPIC:
         sys.exit("Set NTFY_TOPIC (your private ntfy topic name).")
 
-    outdoor = get_outdoor()
+    outdoor_data = get_outdoor()
+    outdoor = outdoor_data["temp"]
+
+    shelly = get_indoor_shelly()
+    indoor_humidity = shelly["humidity"] if shelly else None
+    indoor_battery  = shelly["battery"]  if shelly else None
 
     # Fetch today's forecast; derive indoor estimate and all forward-looking stats
     forecast_max = forecast_peak_hour = forecast_close_hour = forecast_open_hour = None
@@ -305,7 +349,7 @@ def main():
         forecast_max = max(t for _, t in forecast)
         forecast_peak_hour = next(h for h, t in forecast if t == forecast_max)
         indoor_sim = simulate_indoor_day(forecast)
-        indoor_est = get_indoor_shelly() or estimate_indoor(forecast)
+        indoor_est = (shelly["temp"] if shelly else None) or estimate_indoor(forecast)
         forecast_hourly = [[h, t_out, t_in] for (h, t_out), (_, t_in) in zip(forecast, indoor_sim)]
         # Use simulated indoor at each forecast hour for consistent thermal comparisons
         forecast_close_hour = next(
@@ -360,7 +404,7 @@ def main():
 
     save_state(status)
     update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, forecast_close_hour, forecast_open_hour, forecast_hourly)
-    log_history(outdoor, indoor_est, status)
+    log_history(outdoor_data, indoor_est, indoor_humidity, indoor_battery, status)
 
 
 if __name__ == "__main__":
