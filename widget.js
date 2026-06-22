@@ -109,7 +109,7 @@ if (data?.outdoor_c != null) {
   right.addSpacer(2)
 }
 if (data?.indoor_est_c != null) {
-  const indoorText = right.addText(`~${data.indoor_est_c.toFixed(0)}°C inside`)
+  const indoorText = right.addText(`${data.indoor_est_c.toFixed(1)}°C inside`)
   indoorText.font = Font.systemFont(12)
   indoorText.textColor = new Color("#ffffff", 0.45)
   indoorText.rightAlignText()

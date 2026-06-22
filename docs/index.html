@@ -282,7 +282,7 @@
         } else {
           fill.style.width = "0%"; ball.style.background = "rgba(255,255,255,0.65)"
         }
-        document.getElementById("balance-indoor-label").textContent = `~${indoor.toFixed(0)}°C inside`
+        document.getElementById("balance-indoor-label").textContent = `${isForecast ? "~" : ""}${indoor.toFixed(1)}°C inside`
         document.getElementById("balance-outdoor-label").textContent = `${isForecast ? "~" : ""}${outdoor.toFixed(1)}°C outside`
         const absDelta = Math.abs(delta)
         document.getElementById("balance-delta").textContent =
