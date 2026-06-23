@@ -70,7 +70,7 @@ const theme = THEME[status] ?? THEME.unknown
 const widget = new ListWidget()
 widget.backgroundColor = theme.bg
 widget.setPadding(14, 18, 14, 18)
-widget.url = DASHBOARD_URL
+// No widget.url — tapping does nothing (avoids opening Safari every time)
 widget.refreshAfterDate = new Date(Date.now() + 30 * 60 * 1000)
 
 // ── Row: left status + right details ────────

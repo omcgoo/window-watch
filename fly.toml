@@ -1,0 +1,21 @@
+app = "window-watch-ollie"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  TZ = "Europe/London"
+
+[[mounts]]
+  source = "window_watch_data"
+  destination = "/data"
+
+[http_service]
+  # No HTTP — this is a background worker only
+  auto_stop_machines = "off"
+  auto_start_machines = false
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
