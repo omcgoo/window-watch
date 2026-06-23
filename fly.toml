@@ -12,9 +12,10 @@ primary_region = "lhr"
   destination = "/data"
 
 [http_service]
-  # No HTTP — this is a background worker only
+  internal_port = 8080
   auto_stop_machines = "off"
   auto_start_machines = false
+  force_https = true
 
 [[vm]]
   size = "shared-cpu-1x"
