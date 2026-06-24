@@ -297,35 +297,38 @@
         balance.style.display = "none"
       }
 
-      // Forecast block — only show times still in the future
+      // Forecast block. The close time is frozen once it's passed (server-side),
+      // so during the close period we show it as a "closed since" reference rather
+      // than hiding it; reopen stays as the upcoming target.
       const fc = document.getElementById("forecast")
       const nowHour = new Date().getHours()
-      const closeFuture = d.forecast_close_hour != null && d.forecast_close_hour >= nowHour
-      const openFuture = d.forecast_open_hour != null && d.forecast_open_hour >= nowHour
+      const cH = d.forecast_close_hour, oH = d.forecast_open_hour
+      const closeUpcoming = cH != null && cH >= nowHour
+      const openUpcoming = oH != null && oH >= nowHour
       const peakLine = d.forecast_max_c != null && d.forecast_peak_hour != null
         ? `<div class="forecast-peak">Today peaks at ${d.forecast_max_c.toFixed(0)}°C around ${fmtHour(d.forecast_peak_hour)}</div>`
         : ""
 
-      if (closeFuture) {
+      if (s === "close") {
         fc.style.display = ""
         fc.className = "forecast warn"
-        let html = `Close before <strong>${fmtHourApprox(d.forecast_close_hour)}</strong>`
-        if (openFuture) {
-          html += ` · open around <strong>${fmtHourApprox(d.forecast_open_hour)}</strong>`
-        } else if (d.forecast_open_hour != null) {
-          html += ` · open around <strong>${fmtHourApprox(d.forecast_open_hour)}</strong>`
-        } else {
-          html += ` · may stay hot overnight`
-        }
+        let html = cH == null ? `Keep the windows shut`
+          : closeUpcoming ? `Close before <strong>${fmtHourApprox(cH)}</strong>`
+          : `Closed since <strong>${fmtHourApprox(cH)}</strong>`
+        html += oH != null
+          ? ` · open around <strong>${fmtHourApprox(oH)}</strong>`
+          : ` · may stay hot overnight`
         fc.innerHTML = html + peakLine
-      } else if (openFuture) {
+      } else if (closeUpcoming) {
+        fc.style.display = ""
+        fc.className = "forecast warn"
+        let html = `Close before <strong>${fmtHourApprox(cH)}</strong>`
+        if (oH != null) html += ` · open around <strong>${fmtHourApprox(oH)}</strong>`
+        fc.innerHTML = html + peakLine
+      } else if (openUpcoming) {
         fc.style.display = ""
         fc.className = "forecast"
-        fc.innerHTML = `Open around <strong>${fmtHourApprox(d.forecast_open_hour)}</strong>` + peakLine
-      } else if (d.forecast_close_hour != null && d.forecast_open_hour == null && d.status === "close") {
-        fc.style.display = ""
-        fc.className = "forecast"
-        fc.innerHTML = `May stay hot overnight` + peakLine
+        fc.innerHTML = `Open around <strong>${fmtHourApprox(oH)}</strong>` + peakLine
       } else {
         fc.style.display = "none"
       }

@@ -6,6 +6,7 @@ primary_region = "lhr"
 
 [env]
   TZ = "Europe/London"
+  BUILDING_PROFILE = "uninsulated"
 
 [[mounts]]
   source = "window_watch_data"

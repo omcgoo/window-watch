@@ -127,18 +127,23 @@ if (data?.indoor_est_c != null) {
   right.addSpacer(5)
 }
 
-// Forecast line — only show times still in the future
+// Forecast line. Close time is frozen once passed (server-side), so in the close
+// period we show it as a "closed since" reference rather than hiding it.
 const nowHour = new Date().getHours()
-const closeFuture = data?.forecast_close_hour != null && data.forecast_close_hour >= nowHour
-const openFuture = data?.forecast_open_hour != null && data.forecast_open_hour >= nowHour
+const cH = data?.forecast_close_hour, oH = data?.forecast_open_hour
+const closeUpcoming = cH != null && cH >= nowHour
+const openUpcoming = oH != null && oH >= nowHour
 let fcLine = null
-if (closeFuture) {
-  fcLine = `Close before ${fmtHourApprox(data.forecast_close_hour)}`
-  if (data.forecast_open_hour != null) {
-    fcLine += ` · open around ${fmtHourApprox(data.forecast_open_hour)}`
-  }
-} else if (openFuture) {
-  fcLine = `Open around ${fmtHourApprox(data.forecast_open_hour)}`
+if (status === "close") {
+  fcLine = cH == null ? "Keep shut"
+    : closeUpcoming ? `Close before ${fmtHourApprox(cH)}`
+    : `Closed since ${fmtHourApprox(cH)}`
+  if (oH != null) fcLine += ` · open around ${fmtHourApprox(oH)}`
+} else if (closeUpcoming) {
+  fcLine = `Close before ${fmtHourApprox(cH)}`
+  if (oH != null) fcLine += ` · open around ${fmtHourApprox(oH)}`
+} else if (openUpcoming) {
+  fcLine = `Open around ${fmtHourApprox(oH)}`
 }
 if (fcLine) {
   const fcText = right.addText(fcLine)

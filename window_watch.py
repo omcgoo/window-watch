@@ -36,7 +36,7 @@ import os
 import sys
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 LAT = os.getenv("LAT") or "51.527"
 LON = os.getenv("LON") or "-0.021"
@@ -49,14 +49,31 @@ CLOSE_LEAD = float(os.getenv("CLOSE_LEAD") or "0.5")           # anticipation ma
 # Thermal model parameters, per regime. Each hour:
 #   indoor += a * (outdoor - indoor) + b * solar_wm2
 # 'a' is conductance (how fast the room follows outside); 'b' is solar coupling.
-# Open windows = fast follow + strong solar; closed = slow, insulated, blinds cut solar.
-# These are starting defaults — calibrate_from_history() refines them from your flat's
-# own recorded behaviour once enough data accumulates (see load_calibration).
-CAL_DEFAULTS = {
-    "open":   {"a": 0.18, "b": 0.00065, "n": 0},
-    "closed": {"a": 0.06, "b": 0.00030, "n": 0},
+# Open windows = fast follow + strong solar; closed = the building envelope insulates
+# and blinds cut solar — how *well* it insulates depends on the building.
+#
+# BUILDING_PROFILE picks the starting point: "add your building, learn going forward".
+# These presets are only seeds — calibrate_from_history() overrides each regime with a
+# fit to your flat's own recorded behaviour once enough data accumulates. The key
+# difference is the *closed* regime: an insulated flat barely warms once shut; an
+# uninsulated one (solid wall, single glazing) keeps leaking heat in even closed.
+# A future app would surface this as a one-time onboarding choice.
+BUILDING_PROFILES = {
+    "uninsulated": {   # older solid-wall / single glazing — heat still seeps in when shut
+        "label":  "Older / uninsulated (solid wall, single glazing)",
+        "open":   {"a": 0.20, "b": 0.00080, "n": 0},
+        "closed": {"a": 0.10, "b": 0.00040, "n": 0},
+    },
+    "insulated": {     # modern envelope, double glazing — closing really holds the cool
+        "label":  "Modern / insulated (cavity or EWI, double glazing)",
+        "open":   {"a": 0.18, "b": 0.00065, "n": 0},
+        "closed": {"a": 0.05, "b": 0.00022, "n": 0},
+    },
 }
-MIN_CAL_SAMPLES = 24   # per regime before a fit is trusted over the defaults
+BUILDING_PROFILE = os.getenv("BUILDING_PROFILE", "uninsulated")
+_profile = BUILDING_PROFILES.get(BUILDING_PROFILE, BUILDING_PROFILES["uninsulated"])
+CAL_DEFAULTS = {"open": dict(_profile["open"]), "closed": dict(_profile["closed"])}
+MIN_CAL_SAMPLES = 24   # per regime before a fit is trusted over the profile seed
 CALIBRATION_FILE = os.getenv("CALIBRATION_FILE", "calibration.json")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
@@ -329,16 +346,27 @@ def decide(outdoor, indoor, last, rising=False):
 
 
 def load_state():
+    """Return the full persisted state dict ({} if missing/corrupt).
+
+    Holds: status, day, close_hour, open_hour, closed_today, reopened_today.
+    The hour fields let us freeze today's close/open times once they've passed
+    instead of recomputing a drifting 'next crossover from now' each run.
+    """
     try:
         with open(STATE_FILE) as f:
-            return json.load(f).get("status")
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return None
+        return {}
 
 
-def save_state(status):
+def save_state(state):
     with open(STATE_FILE, "w") as f:
-        json.dump({"status": status}, f)
+        json.dump(state, f)
+
+
+def local_today():
+    """Today's date in Europe/London (UTC+1 approximates BST, matching the rest)."""
+    return (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%d")
 
 
 def notify(title, body, tags, priority="default"):
@@ -544,14 +572,46 @@ def main():
     except Exception as e:
         print(f"[warn] Forecast fetch failed: {e}", file=sys.stderr)
 
+    # ---- State, decision, and frozen close/open times ----------------------
+    # forecast_close_hour / forecast_open_hour above are the *fresh* predictions.
+    # We only let them move the displayed times while the event is still ahead —
+    # once you've actually closed, today's close time is frozen for reference, and
+    # likewise the reopen time freezes the moment you reopen. This stops the close
+    # time drifting to "now" as the day wears on.
+    state = load_state()
+    today = local_today()
+    if state.get("day") != today:
+        state = {"status": state.get("status"), "day": today,
+                 "close_hour": None, "open_hour": None,
+                 "closed_today": False, "reopened_today": False}
+
+    last = state.get("status")
+    status = decide(outdoor, indoor_est, last, rising)
+
+    closed_today = state.get("closed_today", False)
+    reopened_today = state.get("reopened_today", False)
+    just_reopened = status == "open" and closed_today and not reopened_today
+
+    if status == "open" and not closed_today and forecast_close_hour is not None:
+        state["close_hour"] = forecast_close_hour          # refine while still pre-close
+    if not reopened_today and not just_reopened and forecast_open_hour is not None:
+        state["open_hour"] = forecast_open_hour            # refine while reopen still ahead
+
+    if status == "close":
+        state["closed_today"] = True
+    if just_reopened:
+        state["reopened_today"] = True
+
+    display_close = state.get("close_hour")
+    display_open = state.get("open_hour")
+
+    print(f"outdoor={outdoor:.1f}  indoor_est={indoor_est}  last={last}  rising={rising}  -> {status}  (close={display_close} open={display_open})")
+
     if is_brief:
         daily_summary(outdoor, cal, shelly["temp"] if shelly else None)
-        update_dashboard(outdoor, load_state() or "open", indoor_est, forecast_max, forecast_peak_hour, forecast_close_hour, forecast_open_hour, forecast_hourly)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly)
+        save_state(state)
         return
-
-    last = load_state()
-    status = decide(outdoor, indoor_est, last, rising)
-    print(f"outdoor={outdoor:.1f}  indoor_est={indoor_est}  last={last}  rising={rising}  -> {status}")
 
     if status != last:
         if forecast_max is not None and forecast_peak_hour is not None:
@@ -594,8 +654,9 @@ def main():
             )
             notify("Open up", body, tags="house,leaves")
 
-    save_state(status)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, forecast_close_hour, forecast_open_hour, forecast_hourly)
+    state["status"] = status
+    save_state(state)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly)
     log_history(outdoor_data, indoor_est, indoor_humidity, indoor_battery, status)
 
 
