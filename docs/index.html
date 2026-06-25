@@ -51,6 +51,12 @@
 
     .temp span { opacity: 0.5; font-size: 0.55em; vertical-align: super; }
 
+    .temp-sub {
+      font-size: 15px;
+      opacity: 0.55;
+      margin-bottom: 32px;
+    }
+
     .thresholds {
       font-size: 13px;
       opacity: 0.35;
@@ -198,7 +204,8 @@
   <div class="card">
     <div class="status" id="status">—</div>
     <div class="hint" id="hint">loading…</div>
-    <div class="temp" id="temp">—<span>°C</span></div>
+    <div class="temp" id="temp">—<span>°</span></div>
+    <div class="temp-sub" id="temp-sub"></div>
     <div class="balance" id="balance" style="display:none">
       <div class="balance-track">
         <div class="balance-bg-cool"></div>
@@ -215,7 +222,6 @@
       </div>
       <div class="balance-temps" style="margin-top:6px">
         <span id="balance-indoor-label"></span>
-        <span class="balance-delta" id="balance-delta"></span>
         <span id="balance-outdoor-label"></span>
       </div>
     </div>
@@ -227,7 +233,7 @@
     </div>
     <div class="wetbulb" id="wetbulb" style="display:none">
       <div class="wetbulb-head">
-        <span class="wetbulb-title">air comfort · how survivable it feels</span>
+        <span class="wetbulb-title" id="wetbulb-title">indoor air · how survivable it feels</span>
         <span class="wetbulb-value" id="wetbulb-value">—</span>
       </div>
       <div class="wetbulb-scale">
@@ -519,9 +525,22 @@
       document.body.className = s
       document.getElementById("status").textContent = copy.label
       document.getElementById("hint").textContent = copy.hint
-      document.getElementById("temp").innerHTML = outdoor != null
-        ? `${isForecast ? "~" : ""}${outdoor.toFixed(1)}<span>°C</span>`
-        : `—<span>°C</span>`
+      // Hero is the indoor↔outdoor gap — the number that actually drives the
+      // open/close call — not the raw outdoor temperature.
+      const tEl = document.getElementById("temp")
+      const subEl = document.getElementById("temp-sub")
+      if (outdoor != null && indoor != null) {
+        const d0 = outdoor - indoor
+        const sign = d0 >= 0 ? "+" : "−"
+        tEl.innerHTML = `${isForecast ? "~" : ""}${sign}${Math.abs(d0).toFixed(1)}<span>°</span>`
+        subEl.textContent =
+          d0 >= 0 ? "warmer outside than in" :
+          d0 <= -HYSTERESIS ? "cooler outside than in" :
+          "barely cooler outside"
+      } else {
+        tEl.innerHTML = `—<span>°</span>`
+        subEl.textContent = ""
+      }
       const balance = document.getElementById("balance")
       if (outdoor != null && indoor != null) {
         balance.style.display = ""
@@ -547,10 +566,6 @@
         }
         document.getElementById("balance-indoor-label").textContent = `${isForecast ? "~" : ""}${indoor.toFixed(1)}°C inside`
         document.getElementById("balance-outdoor-label").textContent = `${isForecast ? "~" : ""}${outdoor.toFixed(1)}°C outside`
-        document.getElementById("balance-delta").textContent =
-          delta >= 0 ? `+${delta.toFixed(1)}° warmer outside` :
-          delta <= -HYSTERESIS ? `${delta.toFixed(1)}° cooler outside` :
-          "holding — barely cooler out"
       } else {
         balance.style.display = "none"
       }
@@ -563,6 +578,8 @@
         const pct = comfortPct(wb)
         const [word, colour] = comfortBand(wb)
         wbBox.style.display = ""
+        document.getElementById("wetbulb-title").textContent =
+          `indoor air at ${est ? "~" : ""}${d.indoor_est_c.toFixed(1)}°C`
         const val = document.getElementById("wetbulb-value")
         val.innerHTML = `${pct}% <span>· ${word}</span>`
         val.style.color = colour
