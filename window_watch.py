@@ -510,13 +510,13 @@ def daily_summary(outdoor, cal, indoor_now=None):
     print(f"daily summary: max={max_temp:.1f}°C at {fmt_hour(max_hour)}  close={close_hour}  open={open_hour}  indoor_now={indoor_now}")
 
     if close_hour is not None:
-        title = f"Close before {fmt_hour_approx(close_hour)}"
+        title = f"Close before {fmt_hour(close_hour)}"
         if open_hour is not None:
-            title += f" · open around {fmt_hour_approx(open_hour)}"
+            title += f" · open around {fmt_hour(open_hour)}"
         body = (
             f"Peak {max_temp:.0f}°C around {fmt_hour(max_hour)}. "
-            f"Shut windows before {fmt_hour_approx(close_hour)}"
-            + (f" and open up again around {fmt_hour_approx(open_hour)}." if open_hour else " — may stay hot into the evening.")
+            f"Shut windows before {fmt_hour(close_hour)}"
+            + (f" and open up again around {fmt_hour(open_hour)}." if open_hour else " — may stay hot into the evening.")
         )
         notify(title, body, tags="house,sunny", priority="high")
     elif max_temp >= INDOOR_BASE + 3:

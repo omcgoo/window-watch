@@ -209,7 +209,7 @@
       return `${h - 12}pm`
     }
 
-    function fmtHourApprox(h) {
+    function fmtHour(h) {
       if (h == null) return "?"
       const r = Math.round(h / 2) * 2
       if (r === 0 || r === 24) return "midnight"
@@ -503,22 +503,22 @@
         fc.style.display = ""
         fc.className = "forecast warn"
         let html = cH == null ? `Keep the windows shut`
-          : closeUpcoming ? `Close before <strong>${fmtHourApprox(cH)}</strong>`
-          : `Closed since <strong>${fmtHourApprox(cH)}</strong>`
+          : closeUpcoming ? `Close before <strong>${fmtHour(cH)}</strong>`
+          : `Closed since <strong>${fmtHour(cH)}</strong>`
         html += oH != null
-          ? ` · open around <strong>${fmtHourApprox(oH)}</strong>`
+          ? ` · open around <strong>${fmtHour(oH)}</strong>`
           : ` · may stay hot overnight`
         fc.innerHTML = html + peakLine
       } else if (closeUpcoming) {
         fc.style.display = ""
         fc.className = "forecast warn"
-        let html = `Close before <strong>${fmtHourApprox(cH)}</strong>`
-        if (oH != null) html += ` · open around <strong>${fmtHourApprox(oH)}</strong>`
+        let html = `Close before <strong>${fmtHour(cH)}</strong>`
+        if (oH != null) html += ` · open around <strong>${fmtHour(oH)}</strong>`
         fc.innerHTML = html + peakLine
       } else if (openUpcoming) {
         fc.style.display = ""
         fc.className = "forecast"
-        fc.innerHTML = `Open around <strong>${fmtHourApprox(oH)}</strong>` + peakLine
+        fc.innerHTML = `Open around <strong>${fmtHour(oH)}</strong>` + peakLine
       } else {
         fc.style.display = "none"
       }

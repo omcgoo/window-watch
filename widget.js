@@ -44,7 +44,7 @@ function fmtHour(h) {
   return `${h - 12}pm`
 }
 
-function fmtHourApprox(h) {
+function fmtHour(h) {
   if (h == null) return "?"
   const r = Math.round(h / 2) * 2
   if (r === 0 || r === 24) return "midnight"
@@ -136,14 +136,14 @@ const openUpcoming = oH != null && oH >= nowHour
 let fcLine = null
 if (status === "close") {
   fcLine = cH == null ? "Keep shut"
-    : closeUpcoming ? `Close before ${fmtHourApprox(cH)}`
-    : `Closed since ${fmtHourApprox(cH)}`
-  if (oH != null) fcLine += ` · open around ${fmtHourApprox(oH)}`
+    : closeUpcoming ? `Close before ${fmtHour(cH)}`
+    : `Closed since ${fmtHour(cH)}`
+  if (oH != null) fcLine += ` · open around ${fmtHour(oH)}`
 } else if (closeUpcoming) {
-  fcLine = `Close before ${fmtHourApprox(cH)}`
-  if (oH != null) fcLine += ` · open around ${fmtHourApprox(oH)}`
+  fcLine = `Close before ${fmtHour(cH)}`
+  if (oH != null) fcLine += ` · open around ${fmtHour(oH)}`
 } else if (openUpcoming) {
-  fcLine = `Open around ${fmtHourApprox(oH)}`
+  fcLine = `Open around ${fmtHour(oH)}`
 }
 if (fcLine) {
   const fcText = right.addText(fcLine)
