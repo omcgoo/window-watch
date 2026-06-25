@@ -153,13 +153,16 @@
     .wetbulb-value span { opacity: 0.5; font-weight: 400; }
     .wetbulb-scale {
       position: relative; height: 8px; border-radius: 4px; overflow: hidden;
+      /* Colour boundaries align with the comfort-band thresholds on the 18–35°
+         wet-bulb scale: comfortable<22 (24%), muggy<26 (47%), caution<28 (59%),
+         danger<31 (76%), extreme beyond. */
       background: linear-gradient(to right,
-        #3a7bd5 0%,        /* safe   (≤22) */
-        #5cae8e 22%,       /* warm   */
-        #d9b54a 45%,       /* muggy  (~26) */
-        #e08a3c 58%,       /* uncomfortable (~28) */
-        #d04a3c 72%,       /* danger (~31) */
-        #7a1f1f 100%);     /* extreme (35) */
+        #3a7bd5 0%,        /* comfortable (≤18) */
+        #5cae8e 24%,       /* → muggy boundary (22°) */
+        #d9b54a 47%,       /* → caution boundary (26°) */
+        #e08a3c 59%,       /* → danger boundary (28°) */
+        #d04a3c 76%,       /* → extreme boundary (31°) */
+        #7a1f1f 100%);     /* extreme (35°) */
     }
     .wetbulb-marker {
       position: absolute; top: -3px; bottom: -3px; width: 3px;
@@ -173,6 +176,7 @@
     .wetbulb-ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
     .wetbulb-readout { margin-top: 8px; font-size: 13px; opacity: 0.7; text-align: center; }
     .wetbulb-readout.alert { opacity: 1; color: #ffd0d0; font-weight: 600; }
+    .wetbulb-foot { margin-top: 4px; font-size: 10px; opacity: 0.28; text-align: center; }
 
     .dot {
       display: inline-block;
@@ -217,20 +221,20 @@
     </div>
     <div class="wetbulb" id="wetbulb" style="display:none">
       <div class="wetbulb-head">
-        <span class="wetbulb-title">wet-bulb · survivability of the air</span>
+        <span class="wetbulb-title">air comfort · how survivable it feels</span>
         <span class="wetbulb-value" id="wetbulb-value">—</span>
       </div>
       <div class="wetbulb-scale">
         <div class="wetbulb-marker" id="wetbulb-marker"></div>
       </div>
       <div class="wetbulb-ticks">
-        <span style="left:0%">18°</span>
-        <span style="left:47%">26°</span>
-        <span style="left:59%">28°</span>
-        <span style="left:76%">31°</span>
-        <span style="left:100%">35°</span>
+        <span style="left:12%">comfortable</span>
+        <span style="left:35%">muggy</span>
+        <span style="left:53%">caution</span>
+        <span style="left:68%">danger</span>
       </div>
       <div class="wetbulb-readout" id="wetbulb-readout"></div>
+      <div class="wetbulb-foot" id="wetbulb-foot"></div>
     </div>
     <div class="forecast" id="forecast" style="display:none"></div>
     <div class="updated"><span class="dot"></span><span id="updated">checking…</span><span id="checked"></span></div>
@@ -463,6 +467,22 @@
       return Math.max(0, Math.min(100, (wb - WB_MIN) / (WB_MAX - WB_MIN) * 100))
     }
 
+    // Translate wet-bulb into a 0–100 comfort score — easier to read at a glance
+    // than a °C value sitting next to the air temperatures. 100% = fresh (≤18°),
+    // 0% = the 28° danger line; beyond that it's pinned at 0 and the readout alerts.
+    function comfortPct(wb) {
+      return Math.round(Math.max(0, Math.min(100, (WB_DANGER - wb) / (WB_DANGER - WB_MIN) * 100)))
+    }
+
+    // [word, colour] for the band the air is currently in.
+    function comfortBand(wb) {
+      if (wb < 22) return ["comfortable", "#7fd1ff"]
+      if (wb < 26) return ["muggy",       "#e0c34a"]
+      if (wb < 28) return ["caution",     "#e08a3c"]
+      if (wb < 31) return ["danger",      "#e0584a"]
+      return ["extreme", "#ff8c8c"]
+    }
+
     function liveTemps(d) {
       // Outdoor ticks between refreshes by following the forecast *trend*, but it's
       // bias-corrected to the last real observed reading (outdoor_c) so it agrees
@@ -540,20 +560,33 @@
       const wbBox = document.getElementById("wetbulb")
       if (wb != null) {
         const est = !!d.indoor_estimated   // sensor offline → modelled temp + RH
+        const pct = comfortPct(wb)
+        const [word, colour] = comfortBand(wb)
         wbBox.style.display = ""
-        document.getElementById("wetbulb-value").innerHTML =
-          `${est ? "~" : ""}${wb.toFixed(1)}°C <span>wet-bulb</span>`
+        const val = document.getElementById("wetbulb-value")
+        val.innerHTML = `${pct}% <span>· ${word}</span>`
+        val.style.color = colour
         document.getElementById("wetbulb-marker").style.left = wbPct(wb) + "%"
+
         const readout = document.getElementById("wetbulb-readout")
-        const note = est ? " · estimated, sensor offline" : ""
-        const gap = WB_DANGER - wb
-        if (gap > 0) {
+        if (wb < 22) {
           readout.className = "wetbulb-readout"
-          readout.textContent = `${gap.toFixed(1)}°C of headroom before the ${WB_DANGER}° danger line${note}`
+          readout.textContent = "Air feels fresh — no heat stress"
+        } else if (wb < 26) {
+          readout.className = "wetbulb-readout"
+          readout.textContent = "Muggy but safe — ventilate when you can"
+        } else if (wb < 28) {
+          readout.className = "wetbulb-readout"
+          readout.textContent = "Getting oppressive — prioritise airflow and water"
         } else {
           readout.className = "wetbulb-readout alert"
-          readout.textContent = `⚠ Past the ${WB_DANGER}° danger line by ${(-gap).toFixed(1)}°C — ventilate, hydrate, avoid exertion${note}`
+          readout.textContent = "⚠ Heat-stress danger — ventilate, hydrate, avoid exertion"
         }
+
+        // Keep the raw wet-bulb available, but demoted to a small technical footnote
+        // so it doesn't read as just another room temperature.
+        document.getElementById("wetbulb-foot").textContent =
+          `${est ? "estimated " : ""}wet-bulb ${wb.toFixed(1)}°C`
       } else {
         wbBox.style.display = "none"
       }
