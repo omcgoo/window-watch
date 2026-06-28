@@ -63,6 +63,18 @@
       margin-bottom: 32px;
     }
 
+    .solar-advisory {
+      font-size: 14px;
+      line-height: 1.5;
+      margin-bottom: 32px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      background: rgba(255,180,40,0.16);
+      border: 1px solid rgba(255,180,40,0.3);
+    }
+    .solar-advisory strong { font-weight: 700; }
+    .solar-advisory .sub { display: block; margin-top: 4px; font-size: 12px; opacity: 0.6; }
+
     .forecast {
       font-size: 15px;
       opacity: 0.75;
@@ -237,6 +249,7 @@
         <span id="balance-outdoor-label"></span>
       </div>
     </div>
+    <div class="solar-advisory" id="solar-advisory" style="display:none"></div>
     <div class="forecast" id="forecast" style="display:none"></div>
     <div class="updated"><span class="dot"></span><span id="updated">checking…</span><span id="checked"></span></div>
     <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">Refresh</button>
@@ -641,6 +654,24 @@
           `${est ? "estimated " : ""}wet-bulb ${wb.toFixed(1)}°C`
       } else {
         wbBox.style.display = "none"
+      }
+
+      // Solar-gain advisory: sun through the glass is strong enough to overcome the
+      // open windows even though it's cooler outside. solar_threshold = (a/b)·(in−out)
+      // from the learned model; it's only set server-side when it's cooler out.
+      const solarEl = document.getElementById("solar-advisory")
+      const sNow = d.solar_now, sThr = d.solar_threshold
+      if (s !== "close" && sNow != null && sThr != null && sNow >= sThr && sNow >= 80) {
+        solarEl.style.display = ""
+        const gapTxt = (indoor != null && outdoor != null && indoor > outdoor)
+          ? ` (it's ${(indoor - outdoor).toFixed(1)}° cooler out)` : ""
+        solarEl.innerHTML =
+          `☀️ <strong>Sun is heating the flat</strong> — about ${Math.round(sNow)} W/m² of sun, ` +
+          `past the ~${sThr} that overcomes your open windows${gapTxt}. ` +
+          `Shade the sunny side; a shaded window can stay open for air.` +
+          `<span class="sub">below ~${sThr} W/m² the cooler outside air wins and ventilation holds the flat down</span>`
+      } else {
+        solarEl.style.display = "none"
       }
 
       // Forecast block. The close time is frozen once it's passed (server-side),

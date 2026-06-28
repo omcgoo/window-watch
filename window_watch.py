@@ -47,7 +47,6 @@ INDOOR_BASE = float(os.getenv("INDOOR_BASE") or "19.0")        # overnight cool-
 HYSTERESIS = float(os.getenv("HYSTERESIS") or "1.0")           # reopen dead band — only reopen once genuinely cooler
 CLOSE_LEAD = float(os.getenv("CLOSE_LEAD") or "0.5")           # anticipation margin — close this many °C before the crossover while outdoor is still climbing
 MAX_INDOOR_RATE = float(os.getenv("MAX_INDOOR_RATE") or "4.0")  # °C/hr; a faster lurch between reads is a sensor glitch, not the room
-SOLAR_MIN = float(os.getenv("SOLAR_MIN") or "250")             # W/m² shortwave that counts as real solar load on the glass
 SOLAR_RISE = float(os.getenv("SOLAR_RISE") or "0.3")           # °C rise since the last reading that counts as indoor genuinely climbing
 
 # Thermal/humidity model parameters, per regime. Each hour:
@@ -473,6 +472,21 @@ def looks_like_glitch(new_temp, last_temp, last_utc):
     return delta / dt > MAX_INDOOR_RATE
 
 
+def solar_rise_threshold(indoor, outdoor, cal):
+    """Shortwave (W/m²) needed to start warming the flat with windows open.
+
+    From the open-regime balance  a·(outdoor−indoor) + b·solar = 0  →
+    solar = (a/b)·(indoor−outdoor). The bigger the indoor↔outdoor gap, the more sun it
+    takes to overcome ventilation cooling; on a cold day no realistic sun will. Returns
+    None when it's already warmer outside (then any sun only adds to the close case).
+    """
+    gap = indoor - outdoor
+    p = cal["open"]
+    if gap <= 0 or p["b"] <= 0:
+        return None
+    return round((p["a"] / p["b"]) * gap)
+
+
 def decide(outdoor, indoor, last, rising=False):
     """Asymmetric decision: close eagerly, reopen patiently.
 
@@ -527,7 +541,7 @@ def notify(title, body, tags, priority="default"):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -547,6 +561,8 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "forecast_hourly": forecast_hourly,
                     "wetbulb_max_c": wetbulb_max_c,
                     "wetbulb_peak_hour": wetbulb_peak_hour,
+                    "solar_now": solar_now,
+                    "solar_threshold": solar_threshold,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -772,6 +788,9 @@ def main():
     if indoor_estimated:
         indoor_humidity_display = estimate_indoor_humidity(indoor_est, outdoor, outdoor_data["humidity"])
 
+    # How much sun it'd take to start warming the flat right now (windows-open balance).
+    solar_threshold = solar_rise_threshold(indoor_est, outdoor, cal)
+
     # ---- Decision, and frozen close/open times -----------------------------
     # forecast_close_hour / forecast_open_hour above are the *fresh* predictions.
     # We only let them move the displayed times while the event is still ahead —
@@ -804,7 +823,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold)
         save_state(state)
         return
 
@@ -856,8 +875,8 @@ def main():
     prior_indoor = state.get("last_indoor")
     indoor_rising = (indoor_real is not None and prior_indoor is not None
                      and indoor_real - prior_indoor >= SOLAR_RISE)
-    if (status != "close" and indoor_rising and solar_now >= SOLAR_MIN
-            and outdoor < indoor_est and not state.get("solar_warned_today")):
+    if (status != "close" and indoor_rising and solar_threshold is not None
+            and solar_now >= solar_threshold and not state.get("solar_warned_today")):
         notify(
             "Sun's heating the flat",
             f"Inside up to {indoor_real:.1f}°C and climbing though it's only {outdoor:.1f}°C out — "
@@ -874,7 +893,7 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold)
     log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status)
 
 
