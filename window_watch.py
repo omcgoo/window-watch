@@ -464,10 +464,13 @@ def looks_like_glitch(new_temp, last_temp, last_utc):
         prev = datetime.strptime(last_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         return False
+    delta = abs(new_temp - last_temp)
+    if delta < 2.0:                  # small moves are never glitches, however close the reads
+        return False
     dt = (datetime.now(timezone.utc) - prev).total_seconds() / 3600.0
     if dt <= 0 or dt > 2.0:          # too stale to judge a rate
         return False
-    return abs(new_temp - last_temp) / dt > MAX_INDOOR_RATE
+    return delta / dt > MAX_INDOOR_RATE
 
 
 def decide(outdoor, indoor, last, rising=False):
