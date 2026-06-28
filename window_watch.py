@@ -46,6 +46,9 @@ CLOSE_ABOVE = float(os.getenv("CLOSE_ABOVE") or "25")    # still used for foreca
 INDOOR_BASE = float(os.getenv("INDOOR_BASE") or "19.0")        # overnight cool-down target (fallback start when no sensor)
 HYSTERESIS = float(os.getenv("HYSTERESIS") or "1.0")           # reopen dead band — only reopen once genuinely cooler
 CLOSE_LEAD = float(os.getenv("CLOSE_LEAD") or "0.5")           # anticipation margin — close this many °C before the crossover while outdoor is still climbing
+MAX_INDOOR_RATE = float(os.getenv("MAX_INDOOR_RATE") or "4.0")  # °C/hr; a faster lurch between reads is a sensor glitch, not the room
+SOLAR_MIN = float(os.getenv("SOLAR_MIN") or "250")             # W/m² shortwave that counts as real solar load on the glass
+SOLAR_RISE = float(os.getenv("SOLAR_RISE") or "0.3")           # °C rise since the last reading that counts as indoor genuinely climbing
 
 # Thermal/humidity model parameters, per regime. Each hour:
 #   indoor   += a * (outdoor - indoor) + b * solar_wm2          (temperature)
@@ -448,6 +451,25 @@ def get_indoor_shelly():
         return None
 
 
+def looks_like_glitch(new_temp, last_temp, last_utc):
+    """True if the jump from the last reading implies a physically impossible rate.
+
+    This flat changes slowly (its time constant is hours), so a multi-degree lurch
+    between two ~30-min readings is the sensor misreporting, not the room. We ignore
+    the reading for that cycle rather than act on a phantom plummet/spike.
+    """
+    if last_temp is None or last_utc is None:
+        return False
+    try:
+        prev = datetime.strptime(last_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    dt = (datetime.now(timezone.utc) - prev).total_seconds() / 3600.0
+    if dt <= 0 or dt > 2.0:          # too stale to judge a rate
+        return False
+    return abs(new_temp - last_temp) / dt > MAX_INDOOR_RATE
+
+
 def decide(outdoor, indoor, last, rising=False):
     """Asymmetric decision: close eagerly, reopen patiently.
 
@@ -575,7 +597,7 @@ def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status):
             f"{outdoor_data['solar_wm2']},"
             f"{outdoor_data['cloud_pct']},"
             f"{outdoor_data['precip_mm']},"
-            f"{indoor_c},"
+            f"{indoor_c if indoor_c is not None else ''},"
             f"{indoor_humidity if indoor_humidity is not None else ''},"
             f"{battery_pct if battery_pct is not None else ''},"
             f"{status}\n"
@@ -679,8 +701,27 @@ def main():
     outdoor = outdoor_data["temp"]
 
     shelly = get_indoor_shelly()
+
+    # ---- Load state early; guard against sensor glitches -----------------------
+    state = load_state()
+    today = local_today()
+    if state.get("day") != today:
+        state = {"status": state.get("status"), "day": today,
+                 "close_hour": None, "open_hour": None,
+                 "closed_today": False, "reopened_today": False,
+                 "last_indoor": state.get("last_indoor"),         # carry over for glitch/rise checks
+                 "last_indoor_utc": state.get("last_indoor_utc"),
+                 "solar_warned_today": False}
+
+    # A wild jump from the last good reading is the sensor misfiring — drop it for this
+    # cycle and fall back to the model estimate, rather than acting on a phantom value.
+    if shelly is not None and looks_like_glitch(shelly["temp"], state.get("last_indoor"), state.get("last_indoor_utc")):
+        print(f"[warn] indoor {shelly['temp']}°C vs last {state.get('last_indoor')}°C looks like a glitch — ignoring this cycle", file=sys.stderr)
+        shelly = None
+
     indoor_humidity = shelly["humidity"] if shelly else None
     indoor_battery  = shelly["battery"]  if shelly else None
+    indoor_real     = shelly["temp"]     if shelly else None   # real reading only (None on dropout/glitch)
 
     is_brief = os.getenv("DAILY_SUMMARY") == "true"
     if is_brief:
@@ -692,6 +733,7 @@ def main():
     forecast_hourly = None
     wetbulb_max = wetbulb_peak_hour = None
     rising = False
+    solar_now = 0.0
     indoor_est = INDOOR_BASE
     try:
         forecast = get_forecast()
@@ -713,6 +755,7 @@ def main():
         temp_now = next((t for h, t, _s, _rh in forecast if h == current_hour), outdoor)
         temp_next = next((t for h, t, _s, _rh in forecast if h == current_hour + 1), temp_now)
         rising = temp_next >= temp_now
+        solar_now = next((s for h, _t, s, _rh in forecast if h == current_hour), 0.0)
     except Exception as e:
         print(f"[warn] Forecast fetch failed: {e}", file=sys.stderr)
 
@@ -726,19 +769,12 @@ def main():
     if indoor_estimated:
         indoor_humidity_display = estimate_indoor_humidity(indoor_est, outdoor, outdoor_data["humidity"])
 
-    # ---- State, decision, and frozen close/open times ----------------------
+    # ---- Decision, and frozen close/open times -----------------------------
     # forecast_close_hour / forecast_open_hour above are the *fresh* predictions.
     # We only let them move the displayed times while the event is still ahead —
     # once you've actually closed, today's close time is frozen for reference, and
     # likewise the reopen time freezes the moment you reopen. This stops the close
-    # time drifting to "now" as the day wears on.
-    state = load_state()
-    today = local_today()
-    if state.get("day") != today:
-        state = {"status": state.get("status"), "day": today,
-                 "close_hour": None, "open_hour": None,
-                 "closed_today": False, "reopened_today": False}
-
+    # time drifting to "now" as the day wears on. (state was loaded up top.)
     last = state.get("status")
     status = decide(outdoor, indoor_est, last, rising)
 
@@ -810,10 +846,33 @@ def main():
             )
             notify("Open up", body, tags="house,leaves")
 
+    # Solar-gain alert: indoor is climbing from sun through the glass/roof even though
+    # it's still cooler outside (so the temperature crossover hasn't fired and we're not
+    # already advising close). Shutting windows would trap the cooler air out, so the fix
+    # is shading, not closing — message it that way. Once per day to avoid nagging.
+    prior_indoor = state.get("last_indoor")
+    indoor_rising = (indoor_real is not None and prior_indoor is not None
+                     and indoor_real - prior_indoor >= SOLAR_RISE)
+    if (status != "close" and indoor_rising and solar_now >= SOLAR_MIN
+            and outdoor < indoor_est and not state.get("solar_warned_today")):
+        notify(
+            "Sun's heating the flat",
+            f"Inside up to {indoor_real:.1f}°C and climbing though it's only {outdoor:.1f}°C out — "
+            "that's sun through the glass, not warm air. Close blinds or curtains on the sunny side; "
+            "a shaded window can stay open for air.",
+            tags="sunny,warning", priority="high",
+        )
+        state["solar_warned_today"] = True
+
+    # Remember this cycle's real reading for next time's glitch/rise checks.
+    if indoor_real is not None:
+        state["last_indoor"] = indoor_real
+        state["last_indoor_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     state["status"] = status
     save_state(state)
     update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour)
-    log_history(outdoor_data, indoor_est, indoor_humidity, indoor_battery, status)
+    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status)
 
 
 if __name__ == "__main__":
