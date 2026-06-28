@@ -48,6 +48,11 @@ HYSTERESIS = float(os.getenv("HYSTERESIS") or "1.0")           # reopen dead ban
 CLOSE_LEAD = float(os.getenv("CLOSE_LEAD") or "0.5")           # anticipation margin — close this many °C before the crossover while outdoor is still climbing
 MAX_INDOOR_RATE = float(os.getenv("MAX_INDOOR_RATE") or "4.0")  # °C/hr; a faster lurch between reads is a sensor glitch, not the room
 SOLAR_RISE = float(os.getenv("SOLAR_RISE") or "0.3")           # °C rise since the last reading that counts as indoor genuinely climbing
+# Sol-air seed: how much the sun-baked south wall lifts the air right outside it, per
+# W/m² of sun (so at 1000 W/m² ≈ +4°C). Once outdoor + k·solar tops indoor, venting the
+# sunny side adds heat, so windows must shut too — not just the blinds. Not in the
+# thermal model and we've no south-side air sensor to learn it, so it's a tunable seed.
+SOLAR_WALL_K = float(os.getenv("SOLAR_WALL_K") or "0.004")
 
 # Thermal/humidity model parameters, per regime. Each hour:
 #   indoor   += a * (outdoor - indoor) + b * solar_wm2          (temperature)
@@ -541,7 +546,7 @@ def notify(title, body, tags, priority="default"):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -563,6 +568,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "wetbulb_peak_hour": wetbulb_peak_hour,
                     "solar_now": solar_now,
                     "solar_threshold": solar_threshold,
+                    "solar_window_threshold": solar_window_threshold,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -788,8 +794,12 @@ def main():
     if indoor_estimated:
         indoor_humidity_display = estimate_indoor_humidity(indoor_est, outdoor, outdoor_data["humidity"])
 
-    # How much sun it'd take to start warming the flat right now (windows-open balance).
+    # Two solar thresholds: the sun that starts warming the room through the glass
+    # (close blinds), and the higher sun that warms the air against the south wall
+    # enough to top indoors (close the sunny-side windows too).
     solar_threshold = solar_rise_threshold(indoor_est, outdoor, cal)
+    solar_window_threshold = (round((indoor_est - outdoor) / SOLAR_WALL_K)
+                              if indoor_est - outdoor > 0 and SOLAR_WALL_K > 0 else None)
 
     # ---- Decision, and frozen close/open times -----------------------------
     # forecast_close_hour / forecast_open_hour above are the *fresh* predictions.
@@ -823,7 +833,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold)
         save_state(state)
         return
 
@@ -868,22 +878,30 @@ def main():
             )
             notify("Open up", body, tags="house,leaves")
 
-    # Solar-gain alert: indoor is climbing from sun through the glass/roof even though
-    # it's still cooler outside (so the temperature crossover hasn't fired and we're not
-    # already advising close). Shutting windows would trap the cooler air out, so the fix
-    # is shading, not closing — message it that way. Once per day to avoid nagging.
+    # Solar-gain alert: indoor is climbing from sun through the glass even though it's
+    # still cooler outside (so the crossover hasn't fired). Two tiers: shade first (kills
+    # the gain through the glass), and on stronger sun shut the sunny-side windows too —
+    # by then the sun-baked wall has warmed the air there, so venting it adds heat.
+    # Once per day to avoid nagging.
     prior_indoor = state.get("last_indoor")
     indoor_rising = (indoor_real is not None and prior_indoor is not None
                      and indoor_real - prior_indoor >= SOLAR_RISE)
     if (status != "close" and indoor_rising and solar_threshold is not None
             and solar_now >= solar_threshold and not state.get("solar_warned_today")):
-        notify(
-            "Sun's heating the flat",
-            f"Inside up to {indoor_real:.1f}°C and climbing though it's only {outdoor:.1f}°C out — "
-            "that's sun through the glass, not warm air. Close blinds or curtains on the sunny side; "
-            "a shaded window can stay open for air.",
-            tags="sunny,warning", priority="high",
-        )
+        windows_too = solar_window_threshold is not None and solar_now >= solar_window_threshold
+        if windows_too:
+            body = (
+                f"Inside up to {indoor_real:.1f}°C and climbing. At {round(solar_now)} W/m² the sun's "
+                "now heating the south wall too, so the air outside it is warm — close the blinds AND "
+                "the sunny-side windows. Keep a shaded window open for air."
+            )
+        else:
+            body = (
+                f"Inside up to {indoor_real:.1f}°C and climbing though it's only {outdoor:.1f}°C out — "
+                "sun through the glass, not warm air. Close the blinds on the sunny side; windows can "
+                "stay open while the outside air is still cooler."
+            )
+        notify("Sun's heating the flat", body, tags="sunny,warning", priority="high")
         state["solar_warned_today"] = True
 
     # Remember this cycle's real reading for next time's glitch/rise checks.
@@ -893,7 +911,7 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold)
     log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status)
 
 

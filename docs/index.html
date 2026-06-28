@@ -660,16 +660,25 @@
       // open windows even though it's cooler outside. solar_threshold = (a/b)·(in−out)
       // from the learned model; it's only set server-side when it's cooler out.
       const solarEl = document.getElementById("solar-advisory")
-      const sNow = d.solar_now, sThr = d.solar_threshold
+      const sNow = d.solar_now, sThr = d.solar_threshold, wThr = d.solar_window_threshold
       if (s !== "close" && sNow != null && sThr != null && sNow >= sThr && sNow >= 80) {
         solarEl.style.display = ""
         const gapTxt = (indoor != null && outdoor != null && indoor > outdoor)
           ? ` (it's ${(indoor - outdoor).toFixed(1)}° cooler out)` : ""
-        solarEl.innerHTML =
-          `☀️ <strong>Sun is heating the flat</strong> — about ${Math.round(sNow)} W/m² of sun, ` +
-          `past the ~${sThr} that overcomes your open windows${gapTxt}. ` +
-          `Shade the sunny side; a shaded window can stay open for air.` +
-          `<span class="sub">below ~${sThr} W/m² the cooler outside air wins and ventilation holds the flat down</span>`
+        if (wThr != null && sNow >= wThr) {
+          // Strong sun: the south wall is warming the air outside it too — shut windows.
+          solarEl.innerHTML =
+            `☀️ <strong>Close blinds + sunny-side windows</strong> — at ${Math.round(sNow)} W/m² the sun ` +
+            `is heating the south wall, so the air just outside is warm too; venting that side now adds heat. ` +
+            `Keep a shaded window open for air.` +
+            `<span class="sub">past ~${sThr} W/m² (warms the room through the glass → blinds) and ~${wThr} (sunny-side air tops indoors → windows)</span>`
+        } else {
+          // Moderate sun: blinds block the gain; outside air still cooler, so vent on.
+          solarEl.innerHTML =
+            `☀️ <strong>Close the blinds, sunny side</strong> — ${Math.round(sNow)} W/m² of sun is heating ` +
+            `the flat through the glass${gapTxt}. Windows can stay open; the outside air is still cooler.` +
+            `<span class="sub">if sun tops ~${wThr} W/m² the south wall warms the outside air too — then shut those windows as well</span>`
+        }
       } else {
         solarEl.style.display = "none"
       }
