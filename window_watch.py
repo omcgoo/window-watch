@@ -762,9 +762,14 @@ def main():
     indoor_est = INDOOR_BASE
     try:
         forecast = get_forecast()
-        indoor_sim = simulate_indoor_day(forecast, cal)
+        current_hour = datetime.now(timezone.utc).hour + 1
         indoor_est = (shelly["temp"] if shelly else None) or estimate_indoor(forecast, cal)
-        forecast_hourly = [[h, t_out, t_in] for (h, t_out, _s, _rh), (_, t_in) in zip(forecast, indoor_sim)]
+        # Chart's indoor forecast is projected forward from the *real* current reading
+        # (anchored), not the whole-day sim that resets to the overnight low each night —
+        # this flat never resets, so once it's heat-soaked the sim's shape is meaningless.
+        # project_indoor returns None before current_hour; the chart only draws it forward.
+        indoor_proj = project_indoor(forecast, indoor_est, current_hour, cal)
+        forecast_hourly = [[h, t_out, t_in] for (h, t_out, _s, _rh), (_, t_in) in zip(forecast, indoor_proj)]
         # Predictions anchored to the live reading when we have one, else model-only
         forecast_close_hour, forecast_open_hour, forecast_max, forecast_peak_hour = forecast_windows(
             forecast, cal, shelly["temp"] if shelly else None
@@ -776,7 +781,6 @@ def main():
             shelly["humidity"] if shelly else None,
         )
         # Is outdoor still climbing? (drives anticipatory close)
-        current_hour = datetime.now(timezone.utc).hour + 1
         temp_now = next((t for h, t, _s, _rh in forecast if h == current_hour), outdoor)
         temp_next = next((t for h, t, _s, _rh in forecast if h == current_hour + 1), temp_now)
         rising = temp_next >= temp_now
