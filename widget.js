@@ -2,8 +2,8 @@
 // Install: paste into a new Scriptable script named "Window Watch",
 // then add to home screen as a Medium widget.
 
-const GIST_API_URL = "https://api.github.com/gists/bd24c63bd7e129c86942db6ed67f9008"
-const DASHBOARD_URL = "https://voop-ollie.github.io/window-watch/"
+const GIST_API_URL = "https://api.github.com/gists/45ba603447bbc3ec258e479f6dee6a20"
+const DASHBOARD_URL = "https://omcgoo.github.io/window-watch/"
 const SCRIPT_NAME   = "Window Watch"  // must match the name in Scriptable
 
 // When tapped, the widget deep-links back into Scriptable which runs this
