@@ -89,12 +89,13 @@ CAL_DEFAULTS = {"open": dict(_profile["open"]), "closed": dict(_profile["closed"
 # with more data and there's no hard cut-over: at n = K the fit and seed weigh equally.
 CAL_PRIOR_WEIGHT = float(os.getenv("CAL_PRIOR_WEIGHT") or "24")
 CALIBRATION_FILE = os.getenv("CALIBRATION_FILE", "calibration.json")
-# Actual window state, reported by the dashboard toggle. Overrides the inferred regime
-# (the app's own open/close recommendation) for calibration when it's fresh — but ages
-# out after WINDOW_TTL_HOURS so a forgotten report can't mislabel for long, reverting to
-# the inferred default. This is the "learn from real states, fall back to inferred" path.
+# Actual window state, reported from the dashboard. Overrides the inferred regime (the
+# app's open/close recommendation) for calibration. A report is retired when the advice
+# next flips (the natural moment you'd change the windows), with WINDOW_TTL_HOURS as a
+# pure backstop for stable spells. This is the "learn from real states, fall back to
+# inferred" path — forgetting to re-confirm can't mislabel for long.
 WINDOW_FILE = os.getenv("WINDOW_FILE", "window_report.json")
-WINDOW_TTL_HOURS = float(os.getenv("WINDOW_TTL_HOURS") or "8")
+WINDOW_TTL_HOURS = float(os.getenv("WINDOW_TTL_HOURS") or "18")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
@@ -161,11 +162,13 @@ def load_calibration():
     """
     cal = {k: {"a": v["a"], "b": v["b"], "c": v["c"], "n": 0, "rmse": None}
            for k, v in CAL_DEFAULTS.items()}
+    cal["_coverage"] = {"confirmed": 0, "total": 0}
     try:
         with open(CALIBRATION_FILE) as f:
             fitted = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return cal
+    cal["_coverage"] = fitted.get("_coverage") or cal["_coverage"]
     K = CAL_PRIOR_WEIGHT
     for regime, seed in CAL_DEFAULTS.items():
         f_r = fitted.get(regime) or {}
@@ -441,12 +444,17 @@ def calibrate_from_history():
     acc = {r: dict(S11=0.0, S12=0.0, S22=0.0, Sy1=0.0, Sy2=0.0, n=0,
                    Hxx=0.0, Hxy=0.0, n_h=0, pairs=[])
            for r in ("open", "closed")}
+    total_pairs = confirmed_pairs = 0
     for (t0, o0, s0, i0, st0, orh0, irh0, win0), (t1, _o1, _s1, i1, _st1, _orh1, irh1, _win1) in zip(rows, rows[1:]):
         dt = (t1 - t0).total_seconds() / 3600.0
         if dt <= 0 or dt > 1.5:          # skip overnight gaps and duplicate runs
             continue
+        total_pairs += 1
+        confirmed = win0 in ("open", "closed")   # regime came from a real report, not inference
+        if confirmed:
+            confirmed_pairs += 1
         # Prefer the reported actual state; fall back to the inferred recommendation.
-        regime = win0 if win0 in ("open", "closed") else ("closed" if st0 == "close" else "open")
+        regime = win0 if confirmed else ("closed" if st0 == "close" else "open")
         a = acc[regime]
         # temperature: Δindoor = a·(outdoor−indoor)·dt + b·solar·dt
         x1, x2, y = (o0 - i0) * dt, s0 * dt, i1 - i0
@@ -487,6 +495,8 @@ def calibrate_from_history():
     if not fitted:
         print("Calibration: not enough data yet — keeping defaults.")
         return
+    # How much of the fit rests on real reported window states vs inferred defaults.
+    fitted["_coverage"] = {"confirmed": confirmed_pairs, "total": total_pairs}
     try:
         with open(CALIBRATION_FILE, "w") as f:
             json.dump(fitted, f, indent=2)
@@ -591,13 +601,20 @@ def save_state(state):
 
 
 def record_window_state(state):
-    """Persist a dashboard-reported actual window state ('open' or 'shut') with a timestamp."""
+    """Persist a dashboard-reported actual window state ('open' or 'shut').
+
+    Stamps it with the recommendation in force at report time ('rec'), so the report
+    can be retired the moment the app's advice next flips — that's when you'd naturally
+    change the windows anyway, so a forgotten re-confirm reverts to the inferred default
+    at exactly the right point.
+    """
     if state not in ("open", "shut"):
         return False
     try:
         with open(WINDOW_FILE, "w") as f:
             json.dump({"state": state,
-                       "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}, f)
+                       "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                       "rec": load_state().get("status")}, f)
         print(f"Window state recorded: {state}")
         return True
     except Exception as e:
@@ -605,9 +622,12 @@ def record_window_state(state):
         return False
 
 
-def current_window_regime():
-    """The user-reported regime ('open'/'closed') if a report exists and is still fresh
-    (within WINDOW_TTL_HOURS); else None, so callers fall back to the inferred default.
+def current_window_regime(current_rec=None):
+    """The reported regime ('open'/'closed') while it's still trustworthy, else None.
+
+    A report is retired when the recommendation flips from what it was at report time
+    (the natural moment windows change), or after WINDOW_TTL_HOURS as a backstop. Beyond
+    that, callers fall back to the inferred default.
     """
     try:
         with open(WINDOW_FILE) as f:
@@ -617,6 +637,9 @@ def current_window_regime():
         return None
     if (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0 > WINDOW_TTL_HOURS:
         return None
+    rec0 = rep.get("rec")
+    if current_rec is not None and rec0 is not None and current_rec != rec0:
+        return None   # advice flipped since you reported — you'd have changed the windows
     return "closed" if rep.get("state") == "shut" else "open"
 
 
@@ -639,7 +662,7 @@ def notify(title, body, tags, priority="default"):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -664,6 +687,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "solar_window_threshold": solar_window_threshold,
                     "model_rmse": model_rmse,
                     "model_samples": model_samples,
+                    "model_confirmed": model_confirmed,
                     "thermal": thermal,
                     "window_actual": window_actual,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -898,8 +922,8 @@ def main():
 
     # How well the learned model predicts the next reading, + how much data backs it.
     model_rmse, model_samples = model_accuracy(cal)
+    model_confirmed = cal.get("_coverage", {}).get("confirmed", 0)   # rows backed by a real report
     thermal = thermal_summary(cal)   # plain heating/cooling rates for display
-    window_regime = current_window_regime()   # reported actual state if fresh, else None
 
     # Two solar thresholds: the sun that starts warming the room through the glass
     # (close blinds), and the higher sun that warms the air against the south wall
@@ -916,6 +940,9 @@ def main():
     # time drifting to "now" as the day wears on. (state was loaded up top.)
     last = state.get("status")
     status = decide(outdoor, indoor_est, last, rising)
+
+    # Reported actual window state, retired once the recommendation flips from it.
+    window_regime = current_window_regime(status)
 
     closed_today = state.get("closed_today", False)
     reopened_today = state.get("reopened_today", False)
@@ -940,7 +967,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed)
         save_state(state)
         return
 
@@ -1018,7 +1045,7 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed)
     log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime)
 
 

@@ -155,22 +155,26 @@
     #checked { margin-left: 8px; opacity: 0.55; }
 
     .winlog {
-      display: flex; align-items: center; justify-content: center; gap: 8px;
-      margin-bottom: 18px; font-size: 12px;
+      display: flex; align-items: center; justify-content: center;
+      gap: 8px; flex-wrap: wrap; margin-bottom: 18px; font-size: 13px;
+      min-height: 30px;
     }
-    .winlog-label { opacity: 0.4; margin-right: 2px; }
-    .winlog-btn {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.18);
-      color: inherit; font-size: 12px; padding: 5px 14px; border-radius: 14px;
-      cursor: pointer; opacity: 0.65; transition: all 0.2s;
+    .winlog .wl-q { opacity: 0.75; }
+    .winlog .wl-q b, .winlog .wl-state b { font-weight: 700; }
+    .winlog .wl-state { opacity: 0.5; }
+    .winlog.confirmed .wl-state b { color: #7fd18b; opacity: 1; }
+    .wl-btn {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.22);
+      color: inherit; font-size: 12px; padding: 4px 13px; border-radius: 13px;
+      cursor: pointer; transition: background 0.2s;
     }
-    .winlog-btn:hover { opacity: 0.9; }
-    .winlog-btn.active {
-      opacity: 1; font-weight: 600;
-      background: rgba(255,255,255,0.9); color: #1a1a2e;
-      border-color: rgba(255,255,255,0.9);
+    .wl-btn:hover { background: rgba(255,255,255,0.2); }
+    .wl-btn.ghost { opacity: 0.55; }
+    .wl-mini {
+      background: none; border: none; color: inherit; opacity: 0.4;
+      font-size: 11px; text-decoration: underline; cursor: pointer; padding: 2px 4px;
     }
+    .wl-mini:hover { opacity: 0.7; }
 
     .chart-wrap {
       width: 100%;
@@ -280,11 +284,7 @@
     </div>
     <div class="solar-advisory" id="solar-advisory" style="display:none"></div>
     <div class="forecast" id="forecast" style="display:none"></div>
-    <div class="winlog">
-      <span class="winlog-label">windows now</span>
-      <button class="winlog-btn" id="win-open" onclick="logWindow('open')">open</button>
-      <button class="winlog-btn" id="win-shut" onclick="logWindow('shut')">shut</button>
-    </div>
+    <div class="winlog" id="winlog"></div>
     <div class="updated"><span class="dot"></span><span id="updated">checking…</span><span id="checked"></span></div>
     <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">Refresh</button>
     <div class="chart-wrap" id="chart-wrap" style="display:none">
@@ -770,34 +770,57 @@
         if (n >= 200 && rmse <= 0.4)      { colour = "#5cd6a0"; word = "high confidence" }
         else if (n >= 50)                 { colour = "#e0c34a"; word = "building confidence" }
         else                              { colour = "#9aa0a6"; word = "still learning" }
+        const confirmed = d.model_confirmed || 0
+        const covPct = n ? Math.round(confirmed / n * 100) : 0
+        const nudge = covPct === 0
+          ? "confirm your windows above to start unlocking a real open-vs-shut split"
+          : `${covPct}% confirmed real — keep confirming to sharpen the open-vs-shut split`
         accEl.style.display = ""
         accEl.innerHTML =
           `<span class="dotc" style="background:${colour}"></span>` +
           `Model predicts the next reading within <strong>±${rmse.toFixed(2)}°C</strong> · ${word}` +
-          `<span class="sub">learned from ${n.toLocaleString()} hourly readings of your flat</span>`
+          `<span class="sub">from ${n.toLocaleString()} readings · ${nudge}</span>`
       } else {
         accEl.style.display = "none"
       }
 
-      // Window toggle: show the recorded state, but let a tap in the last ~35 min stand
-      // (the runner only bakes it into the Gist on the next cycle).
+      // Window nudge: assumed state is the confirmed report (fresh) if any, else the
+      // inferred recommendation. A tap in the last ~35 min stands until the next cycle
+      // bakes it into the Gist.
+      const inferred = s === "close" ? "closed" : "open"
       const recentTap = winLocal && (Date.now() - winLocalTs) < 35 * 60 * 1000
-      setWinActive(recentTap ? winLocal : (d.window_actual || null))
+      const confirmedRegime = recentTap ? winLocal : (d.window_actual || null)
+      renderWinlog(confirmedRegime || inferred, !!confirmedRegime)
     }
 
-    // Highlight which window state is currently on record (open / closed / neither).
-    function setWinActive(regime) {
-      document.getElementById("win-open").classList.toggle("active", regime === "open")
-      document.getElementById("win-shut").classList.toggle("active", regime === "closed")
+    // The window control is a nudge, not a persistent toggle: it states the current
+    // assumption and asks you to confirm or correct it. `confirmed` = backed by a real
+    // report (fresh), vs running on the inferred recommendation.
+    function renderWinlog(assumed, confirmed) {
+      const el = document.getElementById("winlog")
+      const state = assumed === "closed" ? "shut" : "open"
+      const opp   = assumed === "closed" ? "open" : "shut"
+      if (confirmed) {
+        el.className = "winlog confirmed"
+        el.innerHTML =
+          `<span class="wl-state">🪟 windows <b>${state}</b> · confirmed</span>` +
+          `<button class="wl-mini" onclick="logWindow('${opp}')">now ${opp}?</button>`
+      } else {
+        el.className = "winlog nudge"
+        el.innerHTML =
+          `<span class="wl-q">windows <b>${state}</b> right now?</span>` +
+          `<button class="wl-btn" onclick="logWindow('${state}')">yes</button>` +
+          `<button class="wl-btn ghost" onclick="logWindow('${opp}')">no, ${opp}</button>`
+      }
     }
 
     let winLocal = null, winLocalTs = 0, winPending = false
     async function logWindow(state) {
-      // Optimistic: reflect the tap immediately; the runner bakes it into the log/Gist
-      // on the next cycle. Remember it locally so a poll in the gap doesn't clobber it.
+      // Optimistic: reflect the tap immediately as a confirmed state; the runner bakes it
+      // into the log/Gist next cycle. Remember it so a poll in the gap doesn't clobber it.
       winLocal = state === "open" ? "open" : "closed"
       winLocalTs = Date.now()
-      setWinActive(winLocal)
+      renderWinlog(winLocal, true)
       if (winPending) return
       winPending = true
       try {
