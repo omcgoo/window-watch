@@ -208,26 +208,36 @@ def model_accuracy(cal):
     return round((sse / total_n) ** 0.5, 2), total_n
 
 
-def thermal_summary(cal):
+def thermal_summary(cal, confirmed=0):
     """Translate the learned coefficients into plain heating/cooling rates.
 
     Conductance a = the fraction of the indoor↔outdoor gap the flat closes each hour —
     the same whether heat is flowing in or out — reported as %/hr and a half-life (the
-    time to halve the gap, ln2/a). Solar b = the heat-only gain through the glass,
-    reported at a strong-sun reference (~800 W/m²). Uses the open regime for venting and
-    the closed regime for shut-up holding.
+    time to halve the gap, ln2/a). Solar b = the heat-only gain through the glass at a
+    strong-sun reference (~800 W/m²).
+
+    'overall_half_h' is the sample-weighted responsiveness across both regimes — an
+    honest, split-independent "how sluggish is this flat" that's defensible even before
+    real window states are logged. The per-regime open/shut split is only trustworthy
+    once enough confirmed states de-pollute the buckets AND it's physically sane (open
+    faster than shut); 'split_ok' gates showing it.
     """
     def rate(regime):
         a = cal[regime]["a"]
         return (round(a * 100), round(0.693 / a, 1)) if a > 0 else (0, None)
     vent_pct, vent_half = rate("open")
     shut_pct, shut_half = rate("closed")
+    no, nc = cal["open"].get("n", 0), cal["closed"].get("n", 0)
+    ao, ac = cal["open"]["a"], cal["closed"]["a"]
+    overall_a = (no * ao + nc * ac) / (no + nc) if (no + nc) else (ao + ac) / 2
     return {
         "vent_pct": vent_pct, "vent_half_h": vent_half,
         "shut_pct": shut_pct, "shut_half_h": shut_half,
         "hold_ratio": (round(shut_half / vent_half, 1)
                        if vent_half and shut_half else None),
         "solar_c_hr": round(cal["open"]["b"] * 800, 1),   # direct gain at ~800 W/m²
+        "overall_half_h": round(0.693 / overall_a, 1) if overall_a > 0 else None,
+        "split_ok": confirmed >= 120 and vent_pct > shut_pct,
     }
 
 
@@ -942,7 +952,7 @@ def main():
     # How well the learned model predicts the next reading, + how much data backs it.
     model_rmse, model_samples = model_accuracy(cal)
     model_confirmed = cal.get("_coverage", {}).get("confirmed", 0)   # rows backed by a real report
-    thermal = thermal_summary(cal)   # plain heating/cooling rates for display
+    thermal = thermal_summary(cal, model_confirmed)   # heating/cooling rates for display
 
     # Two solar thresholds: the sun that starts warming the room through the glass
     # (close blinds), and the higher sun that warms the air against the south wall
