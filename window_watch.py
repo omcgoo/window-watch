@@ -196,6 +196,29 @@ def model_accuracy(cal):
     return round((sse / total_n) ** 0.5, 2), total_n
 
 
+def thermal_summary(cal):
+    """Translate the learned coefficients into plain heating/cooling rates.
+
+    Conductance a = the fraction of the indoor↔outdoor gap the flat closes each hour —
+    the same whether heat is flowing in or out — reported as %/hr and a half-life (the
+    time to halve the gap, ln2/a). Solar b = the heat-only gain through the glass,
+    reported at a strong-sun reference (~800 W/m²). Uses the open regime for venting and
+    the closed regime for shut-up holding.
+    """
+    def rate(regime):
+        a = cal[regime]["a"]
+        return (round(a * 100), round(0.693 / a, 1)) if a > 0 else (0, None)
+    vent_pct, vent_half = rate("open")
+    shut_pct, shut_half = rate("closed")
+    return {
+        "vent_pct": vent_pct, "vent_half_h": vent_half,
+        "shut_pct": shut_pct, "shut_half_h": shut_half,
+        "hold_ratio": (round(shut_half / vent_half, 1)
+                       if vent_half and shut_half else None),
+        "solar_c_hr": round(cal["open"]["b"] * 800, 1),   # direct gain at ~800 W/m²
+    }
+
+
 def thermal_step(indoor, outdoor, solar, closed, cal):
     """Advance indoor temperature one hour under the given regime."""
     p = cal["closed" if closed else "open"]
@@ -576,7 +599,7 @@ def notify(title, body, tags, priority="default"):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -601,6 +624,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "solar_window_threshold": solar_window_threshold,
                     "model_rmse": model_rmse,
                     "model_samples": model_samples,
+                    "thermal": thermal,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -832,6 +856,7 @@ def main():
 
     # How well the learned model predicts the next reading, + how much data backs it.
     model_rmse, model_samples = model_accuracy(cal)
+    thermal = thermal_summary(cal)   # plain heating/cooling rates for display
 
     # Two solar thresholds: the sun that starts warming the room through the glass
     # (close blinds), and the higher sun that warms the air against the south wall
@@ -872,7 +897,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal)
         save_state(state)
         return
 
@@ -950,7 +975,7 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal)
     log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status)
 
 
