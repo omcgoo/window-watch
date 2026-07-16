@@ -172,21 +172,6 @@
     .model-accuracy strong { font-weight: 600; opacity: 0.9; }
     .model-accuracy .sub { display: block; opacity: 0.7; font-size: 10px; margin-top: 2px; }
 
-    .thermal {
-      width: 100%; margin-top: 18px; padding: 12px 16px; border-radius: 10px;
-      background: rgba(255,255,255,0.05); font-size: 12px;
-    }
-    .thermal .th-title {
-      font-size: 10px; opacity: 0.45; letter-spacing: 0.04em;
-      text-transform: uppercase; margin-bottom: 8px;
-    }
-    .thermal .th-row {
-      display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; opacity: 0.85;
-    }
-    .thermal .th-row span:first-child { white-space: nowrap; }
-    .thermal .th-row span:last-child { text-align: right; opacity: 0.85; }
-    .thermal .th-note { margin-top: 8px; font-size: 11px; opacity: 0.45; line-height: 1.45; }
-
     .wetbulb { width: 100%; margin-top: 32px; }
     .wetbulb-head {
       display: flex; justify-content: space-between; align-items: baseline;
@@ -283,7 +268,6 @@
       <canvas id="temp-chart"></canvas>
     </div>
     <div class="model-accuracy" id="model-accuracy" style="display:none"></div>
-    <div class="thermal" id="thermal-behaviour" style="display:none"></div>
     <div class="wetbulb" id="wetbulb" style="display:none">
       <div class="wetbulb-head">
         <span class="wetbulb-title" id="wetbulb-title">indoor air · how survivable it feels</span>
@@ -772,20 +756,6 @@
         accEl.style.display = "none"
       }
 
-      // Thermal behaviour: the learned heating/cooling rates in plain terms.
-      const t = d.thermal
-      const thEl = document.getElementById("thermal-behaviour")
-      if (t && t.vent_half_h) {
-        thEl.style.display = ""
-        thEl.innerHTML =
-          `<div class="th-title">how your flat behaves · learned</div>` +
-          `<div class="th-row"><span>🌬 Windows open</span><span>trades heat ~${t.vent_pct}%/hr · halves the gap in ~${t.vent_half_h}h</span></div>` +
-          `<div class="th-row"><span>🔒 Shut up</span><span>~${t.shut_pct}%/hr · holds ~${t.hold_ratio}× longer</span></div>` +
-          `<div class="th-row"><span>☀️ Full sun</span><span>+~${t.solar_c_hr}°C/hr through the glass</span></div>` +
-          `<div class="th-note">Heat crosses the walls at the same rate whichever way it flows — so it heats and cools equally through the fabric. Hot days feel one-way only because the sun adds heat with no cooling equivalent, and shutting the windows halves the exchange just when you want it most.</div>`
-      } else {
-        thEl.style.display = "none"
-      }
     }
 
     async function manualRefresh() {
