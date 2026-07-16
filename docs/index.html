@@ -154,6 +154,24 @@
     .refresh-btn:disabled { opacity: 0.4; cursor: default; }
     #checked { margin-left: 8px; opacity: 0.55; }
 
+    .winlog {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      margin-bottom: 18px; font-size: 12px;
+    }
+    .winlog-label { opacity: 0.4; margin-right: 2px; }
+    .winlog-btn {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.18);
+      color: inherit; font-size: 12px; padding: 5px 14px; border-radius: 14px;
+      cursor: pointer; opacity: 0.65; transition: all 0.2s;
+    }
+    .winlog-btn:hover { opacity: 0.9; }
+    .winlog-btn.active {
+      opacity: 1; font-weight: 600;
+      background: rgba(255,255,255,0.9); color: #1a1a2e;
+      border-color: rgba(255,255,255,0.9);
+    }
+
     .chart-wrap {
       width: 100%;
       height: 160px;
@@ -262,6 +280,11 @@
     </div>
     <div class="solar-advisory" id="solar-advisory" style="display:none"></div>
     <div class="forecast" id="forecast" style="display:none"></div>
+    <div class="winlog">
+      <span class="winlog-label">windows now</span>
+      <button class="winlog-btn" id="win-open" onclick="logWindow('open')">open</button>
+      <button class="winlog-btn" id="win-shut" onclick="logWindow('shut')">shut</button>
+    </div>
     <div class="updated"><span class="dot"></span><span id="updated">checking…</span><span id="checked"></span></div>
     <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">Refresh</button>
     <div class="chart-wrap" id="chart-wrap" style="display:none">
@@ -756,6 +779,34 @@
         accEl.style.display = "none"
       }
 
+      // Window toggle: show the recorded state, but let a tap in the last ~35 min stand
+      // (the runner only bakes it into the Gist on the next cycle).
+      const recentTap = winLocal && (Date.now() - winLocalTs) < 35 * 60 * 1000
+      setWinActive(recentTap ? winLocal : (d.window_actual || null))
+    }
+
+    // Highlight which window state is currently on record (open / closed / neither).
+    function setWinActive(regime) {
+      document.getElementById("win-open").classList.toggle("active", regime === "open")
+      document.getElementById("win-shut").classList.toggle("active", regime === "closed")
+    }
+
+    let winLocal = null, winLocalTs = 0, winPending = false
+    async function logWindow(state) {
+      // Optimistic: reflect the tap immediately; the runner bakes it into the log/Gist
+      // on the next cycle. Remember it locally so a poll in the gap doesn't clobber it.
+      winLocal = state === "open" ? "open" : "closed"
+      winLocalTs = Date.now()
+      setWinActive(winLocal)
+      if (winPending) return
+      winPending = true
+      try {
+        await fetch("https://window-watch-ollie.fly.dev/window?state=" + state, {
+          method: "POST",
+          headers: { "Authorization": "Bearer yKkEP4_tiXaXMUh9AR-fkALJjHNHtK6D" },
+        })
+      } catch (_) { /* optimistic UI already updated; next cycle reconciles */ }
+      winPending = false
     }
 
     async function manualRefresh() {

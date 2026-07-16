@@ -89,6 +89,12 @@ CAL_DEFAULTS = {"open": dict(_profile["open"]), "closed": dict(_profile["closed"
 # with more data and there's no hard cut-over: at n = K the fit and seed weigh equally.
 CAL_PRIOR_WEIGHT = float(os.getenv("CAL_PRIOR_WEIGHT") or "24")
 CALIBRATION_FILE = os.getenv("CALIBRATION_FILE", "calibration.json")
+# Actual window state, reported by the dashboard toggle. Overrides the inferred regime
+# (the app's own open/close recommendation) for calibration when it's fresh — but ages
+# out after WINDOW_TTL_HOURS so a forgotten report can't mislabel for long, reverting to
+# the inferred default. This is the "learn from real states, fall back to inferred" path.
+WINDOW_FILE = os.getenv("WINDOW_FILE", "window_report.json")
+WINDOW_TTL_HOURS = float(os.getenv("WINDOW_TTL_HOURS") or "8")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
@@ -427,16 +433,20 @@ def calibrate_from_history():
             in_rh = float(parts[10]) if parts[10] else None
         except ValueError:
             in_rh = None
-        rows.append((ts, outdoor, solar, indoor, status, out_rh, in_rh))
+        # window_actual (col 13) is the reported real state when known; blank on older
+        # rows or unreported periods. Overrides the inferred regime for calibration.
+        win = parts[13].strip() if len(parts) > 13 else ""
+        rows.append((ts, outdoor, solar, indoor, status, out_rh, in_rh, win))
 
     acc = {r: dict(S11=0.0, S12=0.0, S22=0.0, Sy1=0.0, Sy2=0.0, n=0,
                    Hxx=0.0, Hxy=0.0, n_h=0, pairs=[])
            for r in ("open", "closed")}
-    for (t0, o0, s0, i0, st0, orh0, irh0), (t1, _o1, _s1, i1, _st1, _orh1, irh1) in zip(rows, rows[1:]):
+    for (t0, o0, s0, i0, st0, orh0, irh0, win0), (t1, _o1, _s1, i1, _st1, _orh1, irh1, _win1) in zip(rows, rows[1:]):
         dt = (t1 - t0).total_seconds() / 3600.0
         if dt <= 0 or dt > 1.5:          # skip overnight gaps and duplicate runs
             continue
-        regime = "closed" if st0 == "close" else "open"
+        # Prefer the reported actual state; fall back to the inferred recommendation.
+        regime = win0 if win0 in ("open", "closed") else ("closed" if st0 == "close" else "open")
         a = acc[regime]
         # temperature: Δindoor = a·(outdoor−indoor)·dt + b·solar·dt
         x1, x2, y = (o0 - i0) * dt, s0 * dt, i1 - i0
@@ -580,6 +590,36 @@ def save_state(state):
         json.dump(state, f)
 
 
+def record_window_state(state):
+    """Persist a dashboard-reported actual window state ('open' or 'shut') with a timestamp."""
+    if state not in ("open", "shut"):
+        return False
+    try:
+        with open(WINDOW_FILE, "w") as f:
+            json.dump({"state": state,
+                       "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}, f)
+        print(f"Window state recorded: {state}")
+        return True
+    except Exception as e:
+        print(f"[warn] window state save failed: {e}", file=sys.stderr)
+        return False
+
+
+def current_window_regime():
+    """The user-reported regime ('open'/'closed') if a report exists and is still fresh
+    (within WINDOW_TTL_HOURS); else None, so callers fall back to the inferred default.
+    """
+    try:
+        with open(WINDOW_FILE) as f:
+            rep = json.load(f)
+        ts = datetime.strptime(rep["utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
+        return None
+    if (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0 > WINDOW_TTL_HOURS:
+        return None
+    return "closed" if rep.get("state") == "shut" else "open"
+
+
 def local_today():
     """Today's date in Europe/London (UTC+1 approximates BST, matching the rest)."""
     return (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%d")
@@ -599,7 +639,7 @@ def notify(title, body, tags, priority="default"):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -625,6 +665,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "model_rmse": model_rmse,
                     "model_samples": model_samples,
                     "thermal": thermal,
+                    "window_actual": window_actual,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -649,10 +690,10 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
 HISTORY_HEADER = (
     "timestamp,outdoor_c,feels_like_c,outdoor_humidity_pct,"
     "wind_kmh,gusts_kmh,solar_wm2,cloud_pct,precip_mm,"
-    "indoor_c,indoor_humidity_pct,battery_pct,status\n"
+    "indoor_c,indoor_humidity_pct,battery_pct,status,window_actual\n"
 )
 
-def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status):
+def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, window_actual=None):
     """Append a CSV row to the history file in the dashboard Gist."""
     token = os.getenv("GITHUB_TOKEN")
     if not token:
@@ -681,7 +722,8 @@ def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status):
             f"{indoor_c if indoor_c is not None else ''},"
             f"{indoor_humidity if indoor_humidity is not None else ''},"
             f"{battery_pct if battery_pct is not None else ''},"
-            f"{status}\n"
+            f"{status},"
+            f"{window_actual or ''}\n"
         )
         import time
         for attempt in range(3):
@@ -857,6 +899,7 @@ def main():
     # How well the learned model predicts the next reading, + how much data backs it.
     model_rmse, model_samples = model_accuracy(cal)
     thermal = thermal_summary(cal)   # plain heating/cooling rates for display
+    window_regime = current_window_regime()   # reported actual state if fresh, else None
 
     # Two solar thresholds: the sun that starts warming the room through the glass
     # (close blinds), and the higher sun that warms the air against the south wall
@@ -897,7 +940,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime)
         save_state(state)
         return
 
@@ -975,8 +1018,8 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal)
-    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime)
+    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime)
 
 
 if __name__ == "__main__":

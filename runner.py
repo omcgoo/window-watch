@@ -15,9 +15,11 @@ import time
 import threading
 import schedule
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 
 os.environ.setdefault("STATE_FILE", "/data/state.json")
 os.environ.setdefault("CALIBRATION_FILE", "/data/calibration.json")
+os.environ.setdefault("WINDOW_FILE", "/data/window_report.json")
 
 import window_watch as ww
 
@@ -61,7 +63,8 @@ class RefreshHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        if self.path != "/refresh":
+        parsed = urlparse(self.path)
+        if parsed.path not in ("/refresh", "/window"):
             self.send_response(404)
             self.end_headers()
             return
@@ -69,6 +72,15 @@ class RefreshHandler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         if REFRESH_TOKEN and auth != f"Bearer {REFRESH_TOKEN}":
             self.send_response(401)
+            self._cors()
+            self.end_headers()
+            return
+
+        if parsed.path == "/window":
+            # Record the user's reported actual window state, e.g. /window?state=open|shut.
+            state = (parse_qs(parsed.query).get("state") or [""])[0]
+            ok = ww.record_window_state(state)
+            self.send_response(200 if ok else 400)
             self._cors()
             self.end_headers()
             return
