@@ -104,6 +104,9 @@ DASHBOARD_URL = "https://omcgoo.github.io/window-watch/"
 SHELLY_AUTH_KEY = os.getenv("SHELLY_AUTH_KEY")
 SHELLY_DEVICE_ID = os.getenv("SHELLY_DEVICE_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER")
+# For one-tap "confirm actual window state" buttons on the push notifications.
+FLY_BASE = os.getenv("FLY_BASE", "https://window-watch-ollie.fly.dev")
+REFRESH_TOKEN = os.getenv("REFRESH_TOKEN", "")
 
 
 def get_outdoor():
@@ -648,7 +651,21 @@ def local_today():
     return (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%d")
 
 
-def notify(title, body, tags, priority="default"):
+def window_action(state):
+    """An ntfy action button that logs the confirmed window state in one tap.
+
+    The phone's ntfy app POSTs straight to the /window endpoint — no need to open the
+    app — so you can confirm what you actually did right from the alert you're reacting
+    to. Returns None if there's no token to authorise it.
+    """
+    if not REFRESH_TOKEN:
+        return None
+    label = "Confirm shut" if state == "shut" else "Confirm open"
+    return (f"action=http, label={label}, url={FLY_BASE}/window?state={state}, "
+            f"method=POST, headers.Authorization=Bearer {REFRESH_TOKEN}, clear=true")
+
+
+def notify(title, body, tags, priority="default", actions=None):
     if not NTFY_TOPIC:
         print("[error] NTFY_TOPIC not set — cannot send push", file=sys.stderr)
         return
@@ -658,6 +675,8 @@ def notify(title, body, tags, priority="default"):
     req.add_header("Tags", tags)
     req.add_header("Priority", priority)
     req.add_header("Click", DASHBOARD_URL)
+    if actions:
+        req.add_header("Actions", actions)
     with urllib.request.urlopen(req, timeout=20) as r:
         r.read()
 
@@ -1003,14 +1022,16 @@ def main():
                     "Shut windows, doors and blinds."
                 )
             body = lead + (f" Today {peak_ctx}." if peak_ctx else "")
-            notify("Close up now", body, tags="house,sunny", priority="high")
+            notify("Close up now", body, tags="house,sunny", priority="high",
+                   actions=window_action("shut"))
 
         elif status == "open":
             body = (
                 f"Outside dropped to {outdoor:.1f}°C — cooler than {indoor_label}. "
                 "Open up and flush the heat out."
             )
-            notify("Open up", body, tags="house,leaves")
+            notify("Open up", body, tags="house,leaves",
+                   actions=window_action("open"))
 
     # Solar-gain alert: indoor is climbing from sun through the glass even though it's
     # still cooler outside (so the crossover hasn't fired). Two tiers: shade first (kills
@@ -1035,7 +1056,9 @@ def main():
                 "sun through the glass, not warm air. Close the blinds on the sunny side; windows can "
                 "stay open while the outside air is still cooler."
             )
-        notify("Sun's heating the flat", body, tags="sunny,warning", priority="high")
+        # Confirm-shut only when the advice was to shut the windows; otherwise they stay open.
+        notify("Sun's heating the flat", body, tags="sunny,warning", priority="high",
+               actions=window_action("shut" if windows_too else "open"))
         state["solar_warned_today"] = True
 
     # Remember this cycle's real reading for next time's glitch/rise checks.
