@@ -89,6 +89,13 @@ def serve():
     server.serve_forever()
 
 
+# Refit the model once on startup so the accuracy figure is fresh after a deploy
+# (otherwise it'd only refresh at the next 08:10 brief). Cheap and idempotent.
+try:
+    ww.calibrate_from_history()
+except Exception as e:
+    print(f"[warn] startup calibration failed: {e}", file=sys.stderr)
+
 # Run once immediately on startup so the dashboard is fresh
 check()
 

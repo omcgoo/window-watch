@@ -161,6 +161,17 @@
       position: relative;
     }
 
+    .model-accuracy {
+      width: 100%; margin-top: 12px; text-align: center;
+      font-size: 11px; opacity: 0.55; line-height: 1.4;
+    }
+    .model-accuracy .dotc {
+      display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+      margin-right: 5px; vertical-align: middle;
+    }
+    .model-accuracy strong { font-weight: 600; opacity: 0.9; }
+    .model-accuracy .sub { display: block; opacity: 0.7; font-size: 10px; margin-top: 2px; }
+
     .wetbulb { width: 100%; margin-top: 32px; }
     .wetbulb-head {
       display: flex; justify-content: space-between; align-items: baseline;
@@ -256,6 +267,7 @@
     <div class="chart-wrap" id="chart-wrap" style="display:none">
       <canvas id="temp-chart"></canvas>
     </div>
+    <div class="model-accuracy" id="model-accuracy" style="display:none"></div>
     <div class="wetbulb" id="wetbulb" style="display:none">
       <div class="wetbulb-head">
         <span class="wetbulb-title" id="wetbulb-title">indoor air · how survivable it feels</span>
@@ -724,6 +736,24 @@
         const checkedDiff = Math.floor((Date.now() - lastChecked.getTime()) / 60000)
         const checkedStr = checkedDiff < 1 ? "checked just now" : `checked ${checkedDiff}m ago`
         document.getElementById("checked").textContent = "· " + checkedStr
+      }
+
+      // Model accuracy: one-step prediction error + how much data backs it. Confidence
+      // grows with data volume and tightens as the error shrinks.
+      const accEl = document.getElementById("model-accuracy")
+      if (d.model_rmse != null && d.model_samples) {
+        const rmse = d.model_rmse, n = d.model_samples
+        let colour, word
+        if (n >= 200 && rmse <= 0.4)      { colour = "#5cd6a0"; word = "high confidence" }
+        else if (n >= 50)                 { colour = "#e0c34a"; word = "building confidence" }
+        else                              { colour = "#9aa0a6"; word = "still learning" }
+        accEl.style.display = ""
+        accEl.innerHTML =
+          `<span class="dotc" style="background:${colour}"></span>` +
+          `Model predicts the next reading within <strong>±${rmse.toFixed(2)}°C</strong> · ${word}` +
+          `<span class="sub">learned from ${n.toLocaleString()} hourly readings of your flat</span>`
+      } else {
+        accEl.style.display = "none"
       }
     }
 

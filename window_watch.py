@@ -153,7 +153,8 @@ def load_calibration():
     weighted by its own sample count; humidity (c) by the humidity sample count, since
     rows logged while the sensor was offline carry no real RH.
     """
-    cal = {k: {"a": v["a"], "b": v["b"], "c": v["c"]} for k, v in CAL_DEFAULTS.items()}
+    cal = {k: {"a": v["a"], "b": v["b"], "c": v["c"], "n": 0, "rmse": None}
+           for k, v in CAL_DEFAULTS.items()}
     try:
         with open(CALIBRATION_FILE) as f:
             fitted = json.load(f)
@@ -170,7 +171,29 @@ def load_calibration():
         n_h = f_r.get("n_h", 0)
         if n_h > 0 and "c" in f_r:
             cal[regime]["c"] = (n_h * f_r["c"] + K * seed["c"]) / (n_h + K)
+        # carry the fit diagnostics through for the accuracy readout
+        cal[regime]["n"] = n
+        cal[regime]["rmse"] = f_r.get("rmse")
     return cal
+
+
+def model_accuracy(cal):
+    """Roll the per-regime one-step errors into a single headline.
+
+    Returns (rmse_°C, total_samples): how close the learned model gets the next
+    reading on average, and how many hourly transitions back it. None rmse until
+    there's a fit. Samples-weighted so the busier regime dominates the figure.
+    """
+    total_n, sse = 0, 0.0
+    for regime in ("open", "closed"):
+        n = cal[regime].get("n", 0)
+        rmse = cal[regime].get("rmse")
+        if n and rmse is not None:
+            sse += (rmse ** 2) * n
+            total_n += n
+    if total_n == 0:
+        return None, 0
+    return round((sse / total_n) ** 0.5, 2), total_n
 
 
 def thermal_step(indoor, outdoor, solar, closed, cal):
@@ -384,7 +407,7 @@ def calibrate_from_history():
         rows.append((ts, outdoor, solar, indoor, status, out_rh, in_rh))
 
     acc = {r: dict(S11=0.0, S12=0.0, S22=0.0, Sy1=0.0, Sy2=0.0, n=0,
-                   Hxx=0.0, Hxy=0.0, n_h=0)
+                   Hxx=0.0, Hxy=0.0, n_h=0, pairs=[])
            for r in ("open", "closed")}
     for (t0, o0, s0, i0, st0, orh0, irh0), (t1, _o1, _s1, i1, _st1, _orh1, irh1) in zip(rows, rows[1:]):
         dt = (t1 - t0).total_seconds() / 3600.0
@@ -396,6 +419,7 @@ def calibrate_from_history():
         x1, x2, y = (o0 - i0) * dt, s0 * dt, i1 - i0
         a["S11"] += x1 * x1; a["S12"] += x1 * x2; a["S22"] += x2 * x2
         a["Sy1"] += x1 * y;  a["Sy2"] += x2 * y;  a["n"] += 1
+        a["pairs"].append((x1, x2, y))   # kept to score the fit's one-step error afterwards
         # moisture: Δe_in = c·(e_out−e_in)·dt, fit in vapour-pressure space
         if orh0 is not None and irh0 is not None and irh1 is not None:
             e_out = (orh0 / 100.0) * saturation_vp(o0)
@@ -411,9 +435,15 @@ def calibrate_from_history():
         if a["n"] >= 2 and abs(det) > 1e-9:
             coef_a = (a["Sy1"] * a["S22"] - a["Sy2"] * a["S12"]) / det
             coef_b = (a["S11"] * a["Sy2"] - a["S12"] * a["Sy1"]) / det
-            entry["a"] = round(max(0.01, min(0.6, coef_a)), 5)    # clamp to sane ranges
-            entry["b"] = round(max(0.0, min(0.005, coef_b)), 7)
+            ca = max(0.01, min(0.6, coef_a))    # clamp to sane ranges
+            cb = max(0.0, min(0.005, coef_b))
+            entry["a"] = round(ca, 5)
+            entry["b"] = round(cb, 7)
             entry["n"] = a["n"]
+            # One-step prediction error of the (clamped) fit: how close it gets the
+            # next reading, in °C. This is the accuracy metric surfaced to the user.
+            sse = sum((y - (ca * x1 + cb * x2)) ** 2 for x1, x2, y in a["pairs"])
+            entry["rmse"] = round((sse / a["n"]) ** 0.5, 3)
         if a["n_h"] >= 2 and a["Hxx"] > 1e-9:
             coef_c = a["Hxy"] / a["Hxx"]
             entry["c"] = round(max(0.0, min(1.0, coef_c)), 4)     # 0..1 relax fraction/hr
@@ -546,7 +576,7 @@ def notify(title, body, tags, priority="default"):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -569,6 +599,8 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "solar_now": solar_now,
                     "solar_threshold": solar_threshold,
                     "solar_window_threshold": solar_window_threshold,
+                    "model_rmse": model_rmse,
+                    "model_samples": model_samples,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -798,6 +830,9 @@ def main():
     if indoor_estimated:
         indoor_humidity_display = estimate_indoor_humidity(indoor_est, outdoor, outdoor_data["humidity"])
 
+    # How well the learned model predicts the next reading, + how much data backs it.
+    model_rmse, model_samples = model_accuracy(cal)
+
     # Two solar thresholds: the sun that starts warming the room through the glass
     # (close blinds), and the higher sun that warms the air against the south wall
     # enough to top indoors (close the sunny-side windows too).
@@ -837,7 +872,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples)
         save_state(state)
         return
 
@@ -915,7 +950,7 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples)
     log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status)
 
 
