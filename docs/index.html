@@ -92,13 +92,9 @@
       margin-bottom: 0; display: flex; flex-direction: column;
       font-size: 13px;
     }
-    /* Big leading icon in a left column — the text flows beside it, no dead row */
-    #sa-blinds-text, #sa-windows-text {
-      display: grid; grid-template-columns: 36px 1fr; column-gap: 10px;
-      align-items: start;
-    }
-    .sa-icon { grid-column: 1; grid-row: 1 / span 9; font-size: 26px; line-height: 1.2; }
-    #sa-blinds-text > :not(.sa-icon), #sa-windows-text > :not(.sa-icon) { grid-column: 2; }
+    /* Headline: emoji + bold action on one line; the reason sits underneath */
+    .sa-icon { font-size: 20px; line-height: 1; vertical-align: -2px; margin-right: 7px; }
+    .sa-why { font-size: 12px; opacity: 0.7; line-height: 1.45; margin-top: 2px; }
     /* Each card carries its control's confirm nudge */
     .sa-log:empty { display: none; }
     .sa-log { margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.12); }
@@ -804,33 +800,31 @@
         const gapTxt = (indoor != null && outdoor != null && indoor > outdoor)
           ? ` (it's ${(indoor - outdoor).toFixed(1)}° cooler out)` : ""
         document.getElementById("sa-blinds-text").innerHTML =
-          `<div class="sa-icon">🕶</div>` +
-          `<div class="sa-act"><b>Blinds down</b> — the sun is warming the room through the glass${gapTxt}</div>` +
+          `<div class="sa-act"><span class="sa-icon">🕶</span><b>Blinds down</b></div>` +
+          `<div class="sa-why">the sun is warming the room through the glass${gapTxt}</div>` +
           `<span class="sub">${sunTxt} · blinds help past ~${sThr}</span>`
       } else {
         document.getElementById("sa-blinds-text").innerHTML =
-          `<div class="sa-icon">🕶</div>` +
-          `<div class="sa-act"><b>Blinds can be up</b> — the sun's off the glass</div>` +
+          `<div class="sa-act"><span class="sa-icon">🕶</span><b>Blinds can be up</b></div>` +
+          `<div class="sa-why">the sun's off the glass</div>` +
           `<span class="sub">${sunTxt}${sThr != null ? ` · shade once it tops ~${sThr}` : ""}</span>`
       }
       if (windowsActive) {
         document.getElementById("sa-windows-text").innerHTML =
-          `<div class="sa-icon">🪟</div>` +
-          `<div class="sa-act"><b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
+          `<div class="sa-act"><span class="sa-icon">🪟</span><b>Shut sunny-side windows</b></div>` +
+          `<div class="sa-why">the south wall is heating the air just outside — venting that side adds heat</div>` +
           `<div class="sa-act soft">✅ Keep a shaded window open for airflow</div>` +
           `<span class="sub">worth shutting once south-face sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
       } else if (s === "close") {
         document.getElementById("sa-windows-text").innerHTML =
-          `<div class="sa-icon">🪟</div>` +
-          `<div class="sa-act"><b>Windows shut</b> — it's warmer outside than in, keep the heat out</div>` +
+          `<div class="sa-act"><span class="sa-icon">🪟</span><b>Windows shut</b></div>` +
+          `<div class="sa-why">it's warmer outside than in — keep the heat out</div>` +
           `<span class="sub">reopen once outside genuinely cools</span>`
       } else {
         document.getElementById("sa-windows-text").innerHTML =
-          `<div class="sa-icon">🪟</div>` +
-          `<div class="sa-act"><b>Windows open</b> — the outside air is cooler, let it through</div>` +
-          (solarActive && wThr != null
-            ? `<span class="sub">shut the sunny side if south-face sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
-            : `<span class="sub">flushing heat out whenever it's cooler outside</span>`)
+          `<div class="sa-act"><span class="sa-icon">🪟</span><b>Windows open</b></div>` +
+          `<div class="sa-why">the outside air is cooler — let it through</div>` +
+          `<span class="sub">flushing heat out whenever it's cooler outside</span>`
       }
       // The confirm nudges live in their cards permanently now
       document.getElementById("sa-blinds-log").appendChild(blindlogEl)
