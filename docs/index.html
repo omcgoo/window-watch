@@ -832,40 +832,43 @@
       document.getElementById("sa-blinds-log").appendChild(blindlogEl)
       document.getElementById("sa-windows-log").appendChild(winlogEl)
 
-      // Forecast block. The close time is frozen once it's passed (server-side),
-      // so during the close period we show it as a "closed since" reference rather
-      // than hiding it; reopen stays as the upcoming target.
+      // Forecast block — today's plan, tense-aware. States:
+      //   closed now            → closed since / close before X · reopen around Y
+      //   open, close ahead     → close before X · reopen around Y
+      //   open, close behind us → reopened, open through the evening
+      //   open, no close today  → no close needed
       const fc = document.getElementById("forecast")
       const nowHour = new Date().getHours()
       const cH = d.forecast_close_hour, oH = d.forecast_open_hour
       const closeUpcoming = cH != null && cH >= nowHour
-      const openUpcoming = oH != null && oH >= nowHour
+      const peakPast = d.forecast_peak_hour != null && nowHour > d.forecast_peak_hour
       const peakLine = d.forecast_max_c != null && d.forecast_peak_hour != null
-        ? `<div class="forecast-peak">Today peaks at ${d.forecast_max_c.toFixed(0)}°C around ${fmtHour(d.forecast_peak_hour)}</div>`
+        ? `<div class="forecast-peak">Today ${peakPast ? "peaked" : "peaks"} at ${d.forecast_max_c.toFixed(0)}°C around ${fmtHour(d.forecast_peak_hour)}</div>`
         : ""
 
+      fc.style.display = ""
       if (s === "close") {
-        fc.style.display = ""
         fc.className = "forecast warn"
         let html = cH == null ? `Keep the windows shut`
           : closeUpcoming ? `Close before <strong>${fmtHour(cH)}</strong>`
           : `Closed since <strong>${fmtHour(cH)}</strong>`
         html += oH != null
-          ? ` · open around <strong>${fmtHour(oH)}</strong>`
+          ? ` · reopen around <strong>${fmtHour(oH)}</strong>`
           : ` · may stay hot overnight`
         fc.innerHTML = html + peakLine
       } else if (closeUpcoming) {
-        fc.style.display = ""
         fc.className = "forecast warn"
         let html = `Close before <strong>${fmtHour(cH)}</strong>`
-        if (oH != null) html += ` · open around <strong>${fmtHour(oH)}</strong>`
+        if (oH != null) html += ` · reopen around <strong>${fmtHour(oH)}</strong>`
         fc.innerHTML = html + peakLine
-      } else if (openUpcoming) {
-        fc.style.display = ""
+      } else if (cH != null) {
+        // A close happened earlier and we're open again — the day's cycle is done
         fc.className = "forecast"
-        fc.innerHTML = `Open around <strong>${fmtHour(oH)}</strong>` + peakLine
+        fc.innerHTML = `Open through the evening — cooler outside than in` + peakLine
       } else {
-        fc.style.display = "none"
+        // No close ever predicted today
+        fc.className = "forecast"
+        fc.innerHTML = `No close needed today — outside stays cooler` + peakLine
       }
 
       document.getElementById("updated").textContent = "data " + timeAgo(d.updated_utc)
