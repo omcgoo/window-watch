@@ -7,10 +7,10 @@ primary_region = "lhr"
 [env]
   TZ = "Europe/London"
   BUILDING_PROFILE = "uninsulated"
-  # Measured off the map: the south windows face 162°. Used as the cold-start seed
-  # and fallback; the daily refit learns the *effective* bearing from data (currently
-  # ~139° — earlier than geometric because the solid wall responds with a lag).
-  FACADE_AZ = "162"
+  # Measured off the map: the south windows face exactly 160°. Drives all live solar
+  # projections and advisory timing; the daily refit also reports an *effective*
+  # bearing (~139° — east of geometric because the solid wall responds with a lag).
+  FACADE_AZ = "160"
 
 [[mounts]]
   source = "window_watch_data"
