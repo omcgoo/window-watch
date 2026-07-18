@@ -63,15 +63,20 @@
       margin-bottom: 32px;
     }
 
+    /* Persistent state cards for blinds + windows. Neutral by default; a card goes
+       amber ('alert') while the sun genuinely demands that action. */
     .solar-advisory {
       font-size: 14px;
       line-height: 1.5;
-      margin-bottom: 32px;
       padding: 12px 16px;
       border-radius: 10px;
-      background: rgba(255,180,40,0.16);
-      border: 1px solid rgba(255,180,40,0.3);
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
       text-align: left;
+    }
+    .solar-advisory.alert {
+      background: rgba(255,180,40,0.16);
+      border-color: rgba(255,180,40,0.3);
     }
     .solar-advisory .sa-title {
       font-size: 10px; opacity: 0.55; letter-spacing: 0.04em;
@@ -82,21 +87,19 @@
     .solar-advisory .sa-act b { font-weight: 700; }
     .solar-advisory .sa-act.soft { opacity: 0.75; font-size: 13px; }
     .solar-advisory .sub { display: block; margin-top: 6px; font-size: 11px; opacity: 0.5; }
-    /* Callouts sit side by side when both fire; single card spans full width */
-    .sa-row { display: grid; grid-template-columns: 1fr; gap: 12px; margin-bottom: 12px; }
-    .sa-row.dual { grid-template-columns: 1fr 1fr; }
+    .sa-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
     .solar-advisory.sa-card {
       margin-bottom: 0; display: flex; flex-direction: column;
       font-size: 13px;
     }
     /* Big leading icon so it's instantly clear which control the card is about */
     .sa-icon { font-size: 30px; line-height: 1; margin-bottom: 8px; }
-    /* The confirm nudge docks inside its callout while it's active */
+    /* Each card carries its control's confirm nudge */
     .sa-log:empty { display: none; }
-    .sa-log { margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255,180,40,0.25); }
+    .sa-log { margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.12); }
     .sa-log > * { margin-top: 8px; }
     .sa-log .winlog { margin-bottom: 0; margin-top: 0; justify-content: flex-start; }
-    @media (max-width: 480px) { .sa-row.dual { grid-template-columns: 1fr; } }
+    @media (max-width: 480px) { .sa-row { grid-template-columns: 1fr; } }
 
     .forecast {
       font-size: 15px;
@@ -780,41 +783,53 @@
       const sNow = d.solar_now, sThr = d.solar_threshold, wThr = d.solar_window_threshold
       const blindsCard = document.getElementById("sa-blinds")
       const windowsCard = document.getElementById("sa-windows")
-      const logHome = document.getElementById("log-home")
       const winlogEl = document.getElementById("winlog")
       const blindlogEl = document.getElementById("blindlog")
       const solarActive = s !== "close" && sNow != null && sThr != null && sNow >= sThr && sNow >= 80
       const windowsActive = solarActive && wThr != null && sNow >= wThr
-      // During a sun alert both cards show side by side — blinds always "down", windows
-      // either "shut sunny side" (strong sun) or "open" (air still cooler) — so each
-      // control keeps its instruction and its confirm button in one place.
-      document.getElementById("sa-row").className = "sa-row" + (solarActive ? " dual" : "")
+      // Persistent state cards: blinds and windows are always visible side by side,
+      // each carrying its instruction and its confirm nudge. A card turns amber only
+      // while the sun genuinely demands that action; otherwise it sits neutral.
+      const sunTxt = sNow != null ? `south-face sun now ${Math.round(sNow)} W/m²` : ""
+      blindsCard.style.display = ""
+      windowsCard.style.display = ""
+      blindsCard.className = "solar-advisory sa-card" + (solarActive ? " alert" : "")
+      windowsCard.className = "solar-advisory sa-card" + (windowsActive ? " alert" : "")
       if (solarActive) {
         const gapTxt = (indoor != null && outdoor != null && indoor > outdoor)
           ? ` (it's ${(indoor - outdoor).toFixed(1)}° cooler out)` : ""
-        blindsCard.style.display = ""
         document.getElementById("sa-blinds-text").innerHTML =
           `<div class="sa-icon">🕶</div>` +
           `<div class="sa-act"><b>Blinds down</b> — the sun is warming the room through the glass${gapTxt}</div>` +
-          `<span class="sub">south-face sun now ${Math.round(sNow)} W/m² · blinds help past ~${sThr}</span>`
-        document.getElementById("sa-blinds-log").appendChild(blindlogEl)
-        windowsCard.style.display = ""
-        document.getElementById("sa-windows-text").innerHTML = windowsActive
-          ? `<div class="sa-icon">🪟</div>` +
-            `<div class="sa-act"><b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
-            `<div class="sa-act soft">✅ Keep a shaded window open for airflow</div>` +
-            `<span class="sub">worth shutting once south-face sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
-          : `<div class="sa-icon">🪟</div>` +
-            `<div class="sa-act"><b>Windows open</b> — the outside air is still cooler, let it in</div>` +
-            `<span class="sub">shut the sunny side if south-face sun tops ~${wThr ?? "?"} W/m² — it's ${Math.round(sNow)} now</span>`
-        document.getElementById("sa-windows-log").appendChild(winlogEl)
+          `<span class="sub">${sunTxt} · blinds help past ~${sThr}</span>`
       } else {
-        blindsCard.style.display = "none"
-        windowsCard.style.display = "none"
-        // Send the nudges back to their usual spot when no callout is up
-        logHome.appendChild(winlogEl)
-        logHome.appendChild(blindlogEl)
+        document.getElementById("sa-blinds-text").innerHTML =
+          `<div class="sa-icon">🕶</div>` +
+          `<div class="sa-act"><b>Blinds can be up</b> — the sun's off the glass</div>` +
+          `<span class="sub">${sunTxt}${sThr != null ? ` · shade once it tops ~${sThr}` : ""}</span>`
       }
+      if (windowsActive) {
+        document.getElementById("sa-windows-text").innerHTML =
+          `<div class="sa-icon">🪟</div>` +
+          `<div class="sa-act"><b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
+          `<div class="sa-act soft">✅ Keep a shaded window open for airflow</div>` +
+          `<span class="sub">worth shutting once south-face sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
+      } else if (s === "close") {
+        document.getElementById("sa-windows-text").innerHTML =
+          `<div class="sa-icon">🪟</div>` +
+          `<div class="sa-act"><b>Windows shut</b> — it's warmer outside than in, keep the heat out</div>` +
+          `<span class="sub">reopen once outside genuinely cools</span>`
+      } else {
+        document.getElementById("sa-windows-text").innerHTML =
+          `<div class="sa-icon">🪟</div>` +
+          `<div class="sa-act"><b>Windows open</b> — the outside air is cooler, let it through</div>` +
+          (solarActive && wThr != null
+            ? `<span class="sub">shut the sunny side if south-face sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
+            : `<span class="sub">flushing heat out whenever it's cooler outside</span>`)
+      }
+      // The confirm nudges live in their cards permanently now
+      document.getElementById("sa-blinds-log").appendChild(blindlogEl)
+      document.getElementById("sa-windows-log").appendChild(winlogEl)
 
       // Forecast block. The close time is frozen once it's passed (server-side),
       // so during the close period we show it as a "closed since" reference rather
