@@ -71,9 +71,17 @@
       border-radius: 10px;
       background: rgba(255,180,40,0.16);
       border: 1px solid rgba(255,180,40,0.3);
+      text-align: left;
     }
-    .solar-advisory strong { font-weight: 700; }
-    .solar-advisory .sub { display: block; margin-top: 4px; font-size: 12px; opacity: 0.6; }
+    .solar-advisory .sa-title {
+      font-size: 10px; opacity: 0.55; letter-spacing: 0.04em;
+      text-transform: uppercase; margin-bottom: 6px;
+    }
+    /* One line per action: what to do in bold, why in normal weight */
+    .solar-advisory .sa-act { padding: 3px 0; }
+    .solar-advisory .sa-act b { font-weight: 700; }
+    .solar-advisory .sa-act.soft { opacity: 0.75; font-size: 13px; }
+    .solar-advisory .sub { display: block; margin-top: 6px; font-size: 11px; opacity: 0.5; }
 
     .forecast {
       font-size: 15px;
@@ -751,16 +759,18 @@
         if (wThr != null && sNow >= wThr) {
           // Strong sun: the south wall is warming the air outside it too — shut windows.
           solarEl.innerHTML =
-            `☀️ <strong>Close blinds + sunny-side windows</strong> — at ${Math.round(sNow)} W/m² the sun ` +
-            `is heating the south wall, so the air just outside is warm too; venting that side now adds heat. ` +
-            `Keep a shaded window open for air.` +
-            `<span class="sub">past ~${sThr} W/m² (warms the room through the glass → blinds) and ~${wThr} (sunny-side air tops indoors → windows)</span>`
+            `<div class="sa-title">☀️ strong sun on the south side</div>` +
+            `<div class="sa-act">🕶 <b>Blinds down</b> — the sun is warming the room through the glass</div>` +
+            `<div class="sa-act">🪟 <b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
+            `<div class="sa-act soft">✅ Keep a shaded window open for airflow</div>` +
+            `<span class="sub">sun now ${Math.round(sNow)} W/m² · blinds help past ~${sThr} · windows past ~${wThr}</span>`
         } else {
           // Moderate sun: blinds block the gain; outside air still cooler, so vent on.
           solarEl.innerHTML =
-            `☀️ <strong>Close the blinds, sunny side</strong> — ${Math.round(sNow)} W/m² of sun is heating ` +
-            `the flat through the glass${gapTxt}. Windows can stay open; the outside air is still cooler.` +
-            `<span class="sub">if sun tops ~${wThr} W/m² the south wall warms the outside air too — then shut those windows as well</span>`
+            `<div class="sa-title">☀️ sun on the south side</div>` +
+            `<div class="sa-act">🕶 <b>Blinds down</b> — the sun is warming the room through the glass${gapTxt}</div>` +
+            `<div class="sa-act soft">🪟 <b>Windows can stay open</b> — the outside air is still cooler</div>` +
+            `<span class="sub">sun now ${Math.round(sNow)} W/m² · if it tops ~${wThr}, shut the sunny-side windows too</span>`
         }
       } else {
         solarEl.style.display = "none"
