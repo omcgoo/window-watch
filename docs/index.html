@@ -202,14 +202,42 @@
       font-size: 10px; opacity: 0.45; letter-spacing: 0.04em;
       text-transform: uppercase; margin-bottom: 8px;
     }
-    .thermal .th-headline { font-size: 13px; margin-bottom: 6px; }
+    .thermal .th-headline { font-size: 13px; margin-bottom: 4px; line-height: 1.45; }
     .thermal .th-headline b { font-weight: 700; }
-    .thermal .th-row {
-      display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; opacity: 0.85;
+    .thermal .th-sub { font-size: 11px; opacity: 0.5; margin: 10px 0 5px; }
+    /* Speed comparison: label · proportional bar · plain-English verdict */
+    .thermal .th-bar-row {
+      display: grid; grid-template-columns: 96px 1fr; align-items: center;
+      gap: 10px; padding: 3px 0;
     }
-    .thermal .th-row span:first-child { white-space: nowrap; }
-    .thermal .th-row span:last-child { text-align: right; opacity: 0.85; }
+    .thermal .th-bar-label { white-space: nowrap; opacity: 0.85; }
+    .thermal .th-bar-track { display: block; position: relative; }
+    .thermal .th-bar-fill {
+      display: block; height: 8px; border-radius: 4px; margin-top: 2px;
+      background: linear-gradient(90deg, rgba(77,182,255,0.9), rgba(77,182,255,0.45));
+    }
+    .thermal .th-bar-fill.slow { background: linear-gradient(90deg, rgba(255,176,97,0.85), rgba(255,176,97,0.4)); }
+    .thermal .th-bar-verdict { display: block; font-size: 10px; opacity: 0.55; margin-top: 3px; text-align: left; }
+    .thermal .th-plain { padding: 4px 0; opacity: 0.85; line-height: 1.45; text-align: left; }
     .thermal .th-note { margin-top: 8px; font-size: 11px; opacity: 0.45; line-height: 1.45; }
+    /* Engineering figures live behind a tap */
+    .thermal details { margin-top: 10px; }
+    .thermal summary {
+      cursor: pointer; font-size: 10px; opacity: 0.45; letter-spacing: 0.04em;
+      text-transform: uppercase; list-style: none; user-select: none;
+    }
+    .thermal summary::-webkit-details-marker { display: none; }
+    .thermal summary::after { content: " ▸"; }
+    .thermal details[open] summary::after { content: " ▾"; }
+    .thermal .th-eng {
+      margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.08);
+      font-size: 11px; opacity: 0.7; text-align: left;
+    }
+    .thermal .th-eng .th-row {
+      display: flex; justify-content: space-between; gap: 12px; padding: 2px 0;
+    }
+    .thermal .th-eng .th-row span:first-child { white-space: nowrap; }
+    .thermal .th-eng .th-row span:last-child { text-align: right; }
 
     .wetbulb { width: 100%; margin-top: 32px; }
     .wetbulb-head {
@@ -811,25 +839,53 @@
       if (t && t.overall_half_h) {
         thEl.style.display = ""
         const h = t.overall_half_h
-        const mass = h >= 16 ? "very high thermal mass" : h >= 9 ? "high thermal mass" : "moderate thermal mass"
-        let html = `<div class="th-title">how your flat behaves · learned</div>` +
-          `<div class="th-headline">🧱 <b>${mass}</b> — takes ~${h < 20 ? h + "h" : "a day"} to halve a temperature gap to outside</div>`
+        // Plain-English headline: what the sluggishness *means* day to day.
+        const feel = h >= 16
+          ? "🧱 <b>Built like a storage heater</b> — heat takes about a day to work its way in or out. Hot spells build up slowly, but linger."
+          : h >= 9
+          ? "🧱 <b>A slow, steady building</b> — inside drifts towards outside over most of a day."
+          : "🏠 <b>A responsive building</b> — inside follows outside within a few hours."
+        let html = `<div class="th-title">how your flat behaves · learned from your data</div>` +
+          `<div class="th-headline">${feel}</div>`
         if (t.split_ok) {
+          // Speed comparison as proportional bars — instantly scannable.
+          const ratio = t.hold_ratio || (t.vent_pct && t.shut_pct ? Math.round(t.vent_pct / t.shut_pct * 10) / 10 : null)
+          const shutW = t.vent_pct ? Math.max(8, Math.round((t.shut_pct / t.vent_pct) * 100)) : 20
           html +=
-            `<div class="th-row"><span>🌬 Windows open</span><span>~${t.vent_pct}%/hr · halves the gap in ~${t.vent_half_h}h</span></div>` +
-            `<div class="th-row"><span>🔒 Shut up</span><span>~${t.shut_pct}%/hr · holds ~${t.hold_ratio}× longer</span></div>` +
-            `<div class="th-row"><span>☀️ Full sun</span><span>+~${t.solar_c_hr}°C/hr through the glass</span></div>`
+            `<div class="th-sub">how fast inside catches up with outside</div>` +
+            `<div class="th-bar-row"><span class="th-bar-label">🌬 windows open</span>` +
+              `<span class="th-bar-track"><span class="th-bar-fill" style="width:100%"></span>` +
+              `<span class="th-bar-verdict">your fastest lever — flushes heat out overnight</span></span></div>` +
+            `<div class="th-bar-row"><span class="th-bar-label">🔒 windows shut</span>` +
+              `<span class="th-bar-track"><span class="th-bar-fill slow" style="width:${shutW}%"></span>` +
+              `<span class="th-bar-verdict">${ratio ? `~${ratio}× slower` : "much slower"} — seals the cool in on hot days</span></span></div>` +
+            `<div class="th-plain">☀️ Strong sun warms the inside by ~${t.solar_c_hr}°C an hour — even with everything shut</div>`
         } else {
           const cov = d.model_samples ? Math.round((d.model_confirmed || 0) / d.model_samples * 100) : 0
-          html += `<div class="th-note">Open-vs-shut split unlocks once enough real window states are logged (${cov}% so far) — confirm your windows above to sharpen it.</div>`
+          html += `<div class="th-note">The open-vs-shut comparison unlocks once enough real window states are logged (${cov}% so far) — confirm your windows above.</div>`
         }
-        // Inferred blinds effect: measured once there's sunny data with blinds both up & down.
+        // Blinds: measured once there's sunny data both up & down, seeded until then.
         const be = d.blinds_effect
         if (be && be.ok && be.eff != null) {
-          html += `<div class="th-row"><span>🕶️ South blinds</span><span>block ~${Math.round(be.eff * 100)}% of solar (measured)</span></div>`
-        } else if (be) {
-          html += `<div class="th-note">Blinds' solar-blocking is estimated at ~85% (seeded). To *measure* it, log blinds on sunny days both up and down — got ${be.n_up || 0} sunny "up" · ${be.n_down || 0} "down" so far (need ~30 each).</div>`
+          html += `<div class="th-plain">🕶 Your blinds block ~${Math.round(be.eff * 100)}% of that sun — measured from your own data</div>`
+        } else if (be && t.split_ok) {
+          html += `<div class="th-plain">🕶 Blinds likely block most of that sun (estimated) — log them on sunny days to measure it</div>`
         }
+        // Engineering figures on tap — the real coefficients, not the plain-English gloss.
+        let eng = `<div class="th-row"><span>Overall half-life</span><span>~${h}h to halve an indoor–outdoor gap</span></div>` +
+          `<div class="th-row"><span>Time constant τ</span><span>~${Math.round(h / 0.693)}h</span></div>`
+        if (t.split_ok) {
+          eng +=
+            `<div class="th-row"><span>Windows open</span><span>loses ~${t.vent_pct}% of the gap/hr · half-life ~${t.vent_half_h}h</span></div>` +
+            `<div class="th-row"><span>Windows shut</span><span>~${t.shut_pct}%/hr · half-life ~${t.shut_half_h}h · holds ~${t.hold_ratio}×</span></div>`
+        }
+        eng += `<div class="th-row"><span>Solar gain</span><span>+${t.solar_c_hr}°C/hr at full sun (~800 W/m²)</span></div>`
+        if (be) {
+          eng += be.ok && be.eff != null
+            ? `<div class="th-row"><span>Blinds effect</span><span>−${Math.round(be.eff * 100)}% solar (${be.n_up} up · ${be.n_down} down pairs)</span></div>`
+            : `<div class="th-row"><span>Blinds effect</span><span>seeded ~85% · measuring: ${be.n_up || 0} sunny up · ${be.n_down || 0} down (need ~30 each)</span></div>`
+        }
+        html += `<details><summary>the numbers</summary><div class="th-eng">${eng}</div></details>`
         thEl.innerHTML = html
       } else {
         thEl.style.display = "none"
