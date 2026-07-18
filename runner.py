@@ -20,6 +20,7 @@ from urllib.parse import urlparse, parse_qs
 os.environ.setdefault("STATE_FILE", "/data/state.json")
 os.environ.setdefault("CALIBRATION_FILE", "/data/calibration.json")
 os.environ.setdefault("WINDOW_FILE", "/data/window_report.json")
+os.environ.setdefault("BLIND_FILE", "/data/blind_report.json")
 
 import window_watch as ww
 
@@ -64,7 +65,7 @@ class RefreshHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path not in ("/refresh", "/window"):
+        if parsed.path not in ("/refresh", "/window", "/blinds"):
             self.send_response(404)
             self.end_headers()
             return
@@ -76,10 +77,12 @@ class RefreshHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        if parsed.path == "/window":
-            # Record the user's reported actual window state, e.g. /window?state=open|shut.
+        if parsed.path in ("/window", "/blinds"):
+            # Record the user's reported actual state:
+            #   /window?state=open|shut     /blinds?state=down|up
             state = (parse_qs(parsed.query).get("state") or [""])[0]
-            ok = ww.record_window_state(state)
+            ok = (ww.record_window_state(state) if parsed.path == "/window"
+                  else ww.record_blind_state(state))
             self.send_response(200 if ok else 400)
             self._cors()
             self.end_headers()

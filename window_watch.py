@@ -96,6 +96,14 @@ CALIBRATION_FILE = os.getenv("CALIBRATION_FILE", "calibration.json")
 # inferred" path — forgetting to re-confirm can't mislabel for long.
 WINDOW_FILE = os.getenv("WINDOW_FILE", "window_report.json")
 WINDOW_TTL_HOURS = float(os.getenv("WINDOW_TTL_HOURS") or "18")
+# Blinds are the third control — external south blinds block most solar before it hits
+# the glass. Logged like windows so calibration can separate shaded from unshaded days
+# instead of blending them into one muddy solar coefficient: when down, only BLIND_FACTOR
+# of the solar reaches the interior (external blinds cut ~85%). A tunable seed for now;
+# once enough shaded/unshaded data accrues we can learn the real figure.
+BLIND_FILE = os.getenv("BLIND_FILE", "blind_report.json")
+BLIND_TTL_HOURS = float(os.getenv("BLIND_TTL_HOURS") or "18")
+BLIND_FACTOR = float(os.getenv("BLIND_FACTOR") or "0.15")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
@@ -452,7 +460,12 @@ def calibrate_from_history():
         # window_actual (col 13) is the reported real state when known; blank on older
         # rows or unreported periods. Overrides the inferred regime for calibration.
         win = parts[13].strip() if len(parts) > 13 else ""
-        rows.append((ts, outdoor, solar, indoor, status, out_rh, in_rh, win))
+        blind = parts[14].strip() if len(parts) > 14 else ""
+        # Blinds down (shaded) → only BLIND_FACTOR of the sun reaches the interior, so the
+        # solar term sees effective solar. Keeps shaded days from dragging the coefficient
+        # toward zero and lets shaded/unshaded days both inform one clean b.
+        solar_eff = solar * BLIND_FACTOR if blind == "down" else solar
+        rows.append((ts, outdoor, solar_eff, indoor, status, out_rh, in_rh, win))
 
     acc = {r: dict(S11=0.0, S12=0.0, S22=0.0, Sy1=0.0, Sy2=0.0, n=0,
                    Hxx=0.0, Hxy=0.0, n_h=0, pairs=[])
@@ -656,6 +669,34 @@ def current_window_regime(current_rec=None):
     return "closed" if rep.get("state") == "shut" else "open"
 
 
+def record_blind_state(state):
+    """Persist a reported blinds state ('down' = shaded, 'up' = exposed) with a timestamp."""
+    if state not in ("down", "up"):
+        return False
+    try:
+        with open(BLIND_FILE, "w") as f:
+            json.dump({"state": state,
+                       "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}, f)
+        print(f"Blind state recorded: {state}")
+        return True
+    except Exception as e:
+        print(f"[warn] blind state save failed: {e}", file=sys.stderr)
+        return False
+
+
+def current_blind_regime():
+    """Reported blinds state ('down'/'up') if fresh (within BLIND_TTL_HOURS), else None."""
+    try:
+        with open(BLIND_FILE) as f:
+            rep = json.load(f)
+        ts = datetime.strptime(rep["utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
+        return None
+    if (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0 > BLIND_TTL_HOURS:
+        return None
+    return rep.get("state")
+
+
 def local_today():
     """Today's date in Europe/London (UTC+1 approximates BST, matching the rest)."""
     return (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%d")
@@ -675,6 +716,16 @@ def window_action(state):
             f"method=POST, headers.Authorization=Bearer {REFRESH_TOKEN}, clear=true")
 
 
+def blind_action(state):
+    """ntfy action button to log blinds ('down'/'up') in one tap — pairs with the solar
+    alert that tells you to shade. Feeds the blinds-vs-solar learning."""
+    if not REFRESH_TOKEN:
+        return None
+    label = "Blinds down" if state == "down" else "Blinds up"
+    return (f"action=http, label={label}, url={FLY_BASE}/blinds?state={state}, "
+            f"method=POST, headers.Authorization=Bearer {REFRESH_TOKEN}, clear=true")
+
+
 def notify(title, body, tags, priority="default", actions=None):
     if not NTFY_TOPIC:
         print("[error] NTFY_TOPIC not set — cannot send push", file=sys.stderr)
@@ -691,7 +742,7 @@ def notify(title, body, tags, priority="default", actions=None):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None, blinds_actual=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -719,6 +770,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "model_confirmed": model_confirmed,
                     "thermal": thermal,
                     "window_actual": window_actual,
+                    "blinds_actual": blinds_actual,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -743,10 +795,10 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
 HISTORY_HEADER = (
     "timestamp,outdoor_c,feels_like_c,outdoor_humidity_pct,"
     "wind_kmh,gusts_kmh,solar_wm2,cloud_pct,precip_mm,"
-    "indoor_c,indoor_humidity_pct,battery_pct,status,window_actual\n"
+    "indoor_c,indoor_humidity_pct,battery_pct,status,window_actual,blinds_actual\n"
 )
 
-def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, window_actual=None):
+def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, window_actual=None, blinds_actual=None):
     """Append a CSV row to the history file in the dashboard Gist."""
     token = os.getenv("GITHUB_TOKEN")
     if not token:
@@ -776,7 +828,8 @@ def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, wi
             f"{indoor_humidity if indoor_humidity is not None else ''},"
             f"{battery_pct if battery_pct is not None else ''},"
             f"{status},"
-            f"{window_actual or ''}\n"
+            f"{window_actual or ''},"
+            f"{blinds_actual or ''}\n"
         )
         import time
         for attempt in range(3):
@@ -972,6 +1025,7 @@ def main():
 
     # Reported actual window state, retired once the recommendation flips from it.
     window_regime = current_window_regime(status)
+    blind_regime = current_blind_regime()   # 'down'/'up'/None (reported blinds state if fresh)
 
     closed_today = state.get("closed_today", False)
     reopened_today = state.get("reopened_today", False)
@@ -996,7 +1050,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime)
         save_state(state)
         return
 
@@ -1066,9 +1120,12 @@ def main():
                 "sun through the glass, not warm air. Close the blinds on the sunny side; windows can "
                 "stay open while the outside air is still cooler."
             )
-        # Confirm-shut only when the advice was to shut the windows; otherwise they stay open.
+        # Confirm-shut only when the advice was to shut the windows; otherwise they stay
+        # open. The advice always says shade, so offer a "blinds down" confirm too.
+        acts = [a for a in (window_action("shut" if windows_too else "open"),
+                            blind_action("down")) if a]
         notify("Sun's heating the flat", body, tags="sunny,warning", priority="high",
-               actions=window_action("shut" if windows_too else "open"))
+               actions="; ".join(acts) if acts else None)
         state["solar_warned_today"] = True
 
     # Remember this cycle's real reading for next time's glitch/rise checks.
@@ -1078,8 +1135,8 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed)
-    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime)
+    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime)
 
 
 if __name__ == "__main__":

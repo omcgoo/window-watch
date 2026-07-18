@@ -302,6 +302,7 @@
     <div class="solar-advisory" id="solar-advisory" style="display:none"></div>
     <div class="forecast" id="forecast" style="display:none"></div>
     <div class="winlog" id="winlog"></div>
+    <div class="winlog" id="blindlog"></div>
     <div class="updated"><span class="dot"></span><span id="updated">checking…</span><span id="checked"></span></div>
     <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">Refresh</button>
     <div class="chart-wrap" id="chart-wrap" style="display:none">
@@ -834,6 +835,14 @@
       const recentTap = winLocal && (Date.now() - winLocalTs) < 35 * 60 * 1000
       const confirmedRegime = recentTap ? winLocal : (d.window_actual || null)
       renderWinlog(confirmedRegime || inferred, !!confirmedRegime)
+
+      // Blinds nudge: default guess is "down" while the sun's strong enough to be heating
+      // the flat (you'd shade), else "up"; a real report overrides it.
+      const blindsInferred = (d.solar_threshold != null && d.solar_now != null &&
+                              d.solar_now >= d.solar_threshold) ? "down" : "up"
+      const recentBlindTap = blindLocal && (Date.now() - blindLocalTs) < 35 * 60 * 1000
+      const confirmedBlind = recentBlindTap ? blindLocal : (d.blinds_actual || null)
+      renderBlindlog(confirmedBlind || blindsInferred, !!confirmedBlind)
     }
 
     // The window control is a nudge, not a persistent toggle: it states the current
@@ -855,6 +864,41 @@
           `<button class="wl-btn" onclick="logWindow('${state}')">yes</button>` +
           `<button class="wl-btn ghost" onclick="logWindow('${opp}')">no, ${opp}</button>`
       }
+    }
+
+    // Blinds nudge — mirrors the windows one. State is "down" (shaded) / "up" (exposed).
+    function renderBlindlog(assumed, confirmed) {
+      const el = document.getElementById("blindlog")
+      const state = assumed === "down" ? "down" : "up"
+      const opp   = assumed === "down" ? "up" : "down"
+      if (confirmed) {
+        el.className = "winlog confirmed"
+        el.innerHTML =
+          `<span class="wl-state">🕶️ blinds <b>${state}</b> · confirmed</span>` +
+          `<button class="wl-mini" onclick="logBlind('${opp}')">now ${opp}?</button>`
+      } else {
+        el.className = "winlog nudge"
+        el.innerHTML =
+          `<span class="wl-q">south blinds <b>${state}</b> right now?</span>` +
+          `<button class="wl-btn" onclick="logBlind('${state}')">yes</button>` +
+          `<button class="wl-btn ghost" onclick="logBlind('${opp}')">no, ${opp}</button>`
+      }
+    }
+
+    let blindLocal = null, blindLocalTs = 0, blindPending = false
+    async function logBlind(state) {
+      blindLocal = state === "down" ? "down" : "up"
+      blindLocalTs = Date.now()
+      renderBlindlog(blindLocal, true)
+      if (blindPending) return
+      blindPending = true
+      try {
+        await fetch("https://window-watch-ollie.fly.dev/blinds?state=" + state, {
+          method: "POST",
+          headers: { "Authorization": "Bearer yKkEP4_tiXaXMUh9AR-fkALJjHNHtK6D" },
+        })
+      } catch (_) { /* optimistic UI already updated; next cycle reconciles */ }
+      blindPending = false
     }
 
     let winLocal = null, winLocalTs = 0, winPending = false
