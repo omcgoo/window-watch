@@ -202,28 +202,24 @@
       font-size: 10px; opacity: 0.45; letter-spacing: 0.04em;
       text-transform: uppercase; margin-bottom: 8px;
     }
-    .thermal .th-headline { font-size: 13px; margin-bottom: 4px; line-height: 1.45; }
-    .thermal .th-headline b { font-weight: 700; }
-    .thermal .th-sub { font-size: 11px; opacity: 0.5; margin: 10px 0 5px; }
-    /* Speed comparison: label · proportional bar · plain-English verdict */
+    /* One trait = bold behaviour + one supporting sentence */
+    .thermal .th-trait { margin-top: 10px; }
+    .thermal .th-trait:first-of-type { margin-top: 2px; }
+    .thermal .th-trait-name { font-size: 13px; font-weight: 600; }
+    .thermal .th-trait-body { font-size: 11px; opacity: 0.6; line-height: 1.5; margin-top: 2px; }
+    /* Open-vs-shut pace, as proportional bars */
     .thermal .th-bar-row {
-      display: grid; grid-template-columns: 96px 1fr; align-items: center;
-      gap: 10px; padding: 3px 0;
+      display: grid; grid-template-columns: 34px 1fr; align-items: center;
+      gap: 8px; padding: 2px 0;
     }
-    .thermal .th-bar-label { white-space: nowrap; opacity: 0.85; }
+    .thermal .th-bar-row:first-of-type { margin-top: 6px; }
+    .thermal .th-bar-label { font-size: 10px; opacity: 0.5; text-align: right; }
     .thermal .th-bar-track { display: block; position: relative; }
     .thermal .th-bar-fill {
-      display: block; height: 8px; border-radius: 4px; margin-top: 2px;
+      display: block; height: 8px; border-radius: 4px;
       background: linear-gradient(90deg, rgba(77,182,255,0.9), rgba(77,182,255,0.45));
     }
     .thermal .th-bar-fill.slow { background: linear-gradient(90deg, rgba(255,176,97,0.85), rgba(255,176,97,0.4)); }
-    .thermal .th-bar-verdict { display: block; font-size: 10px; opacity: 0.55; margin-top: 3px; text-align: left; }
-    .thermal .th-plain {
-      display: grid; grid-template-columns: 96px 1fr; align-items: baseline;
-      gap: 10px; padding: 3px 0; text-align: left;
-    }
-    .thermal .th-plain span:first-child { white-space: nowrap; opacity: 0.85; }
-    .thermal .th-plain span:last-child { opacity: 0.7; font-size: 11px; line-height: 1.45; }
     .thermal .th-note { margin-top: 8px; font-size: 11px; opacity: 0.45; line-height: 1.45; }
     /* Engineering figures live behind a tap */
     .thermal details { margin-top: 10px; }
@@ -844,37 +840,35 @@
       if (t && t.overall_half_h) {
         thEl.style.display = ""
         const h = t.overall_half_h
-        // Plain-English headline: what the sluggishness *means* day to day.
-        const feel = h >= 16
-          ? "🧱 <b>Built like a storage heater</b> — heat takes about a day to work its way in or out. Hot spells build up slowly, but linger."
+        // Three traits, each a *behaviour of the flat* (not advice): its pace,
+        // its relationship with the sun, and how it responds to being opened up.
+        const be = d.blinds_effect
+        const pace = h >= 16
+          ? ["🐢 It moves slowly", "Built heavy — it takes about a day to catch up with the weather outside. Heatwaves reach you late, and hang around after they've broken."]
           : h >= 9
-          ? "🧱 <b>A slow, steady building</b> — inside drifts towards outside over most of a day."
-          : "🏠 <b>A responsive building</b> — inside follows outside within a few hours."
+          ? ["🐢 It takes its time", "Inside drifts towards the outside temperature over most of a day."]
+          : ["🐇 It reacts quickly", "Inside follows the outside temperature within a few hours."]
+        const sunBody = `Strong sun warms it by ~${t.solar_c_hr}°C an hour through the south glass — even with every window shut.` +
+          (be && be.ok && be.eff != null
+            ? ` Your blinds block ~${Math.round(be.eff * 100)}% of that (measured).`
+            : ` Blinds block most of that — log them on sunny days to measure exactly how much.`)
         let html = `<div class="th-title">how your flat behaves · learned from your data</div>` +
-          `<div class="th-headline">${feel}</div>`
+          `<div class="th-trait"><div class="th-trait-name">${pace[0]}</div><div class="th-trait-body">${pace[1]}</div></div>` +
+          `<div class="th-trait"><div class="th-trait-name">☀️ It feels the sun</div><div class="th-trait-body">${sunBody}</div></div>`
         if (t.split_ok) {
-          // Speed comparison as proportional bars — instantly scannable.
+          // Its one quick mode: proportional bars make the contrast scannable.
           const ratio = t.hold_ratio || (t.vent_pct && t.shut_pct ? Math.round(t.vent_pct / t.shut_pct * 10) / 10 : null)
           const shutW = t.vent_pct ? Math.max(8, Math.round((t.shut_pct / t.vent_pct) * 100)) : 20
           html +=
-            `<div class="th-sub">how fast inside catches up with outside</div>` +
-            `<div class="th-bar-row"><span class="th-bar-label">🌬 windows open</span>` +
-              `<span class="th-bar-track"><span class="th-bar-fill" style="width:100%"></span>` +
-              `<span class="th-bar-verdict">your fastest lever — flushes heat out overnight</span></span></div>` +
-            `<div class="th-bar-row"><span class="th-bar-label">🔒 windows shut</span>` +
-              `<span class="th-bar-track"><span class="th-bar-fill slow" style="width:${shutW}%"></span>` +
-              `<span class="th-bar-verdict">${ratio ? `~${ratio}× slower` : "much slower"} — seals the cool in on hot days</span></span></div>` +
-            `<div class="th-plain"><span>☀️ strong sun</span><span>adds ~${t.solar_c_hr}°C an hour, even shut up</span></div>`
+            `<div class="th-trait"><div class="th-trait-name">🌬 Windows change its pace</div>` +
+            `<div class="th-trait-body">Open, it trades heat with outside ${ratio ? `~${ratio}× faster` : "far faster"} than sealed up — its only quick mode.</div></div>` +
+            `<div class="th-bar-row"><span class="th-bar-label">open</span>` +
+              `<span class="th-bar-track"><span class="th-bar-fill" style="width:100%"></span></span></div>` +
+            `<div class="th-bar-row"><span class="th-bar-label">shut</span>` +
+              `<span class="th-bar-track"><span class="th-bar-fill slow" style="width:${shutW}%"></span></span></div>`
         } else {
           const cov = d.model_samples ? Math.round((d.model_confirmed || 0) / d.model_samples * 100) : 0
-          html += `<div class="th-note">The open-vs-shut comparison unlocks once enough real window states are logged (${cov}% so far) — confirm your windows above.</div>`
-        }
-        // Blinds: measured once there's sunny data both up & down, seeded until then.
-        const be = d.blinds_effect
-        if (be && be.ok && be.eff != null) {
-          html += `<div class="th-plain"><span>🕶 blinds down</span><span>block ~${Math.round(be.eff * 100)}% of that (measured)</span></div>`
-        } else if (be && t.split_ok) {
-          html += `<div class="th-plain"><span>🕶 blinds down</span><span>block most of that — log them to measure</span></div>`
+          html += `<div class="th-note">One more trait — how much windows change its pace — unlocks once enough real window states are logged (${cov}% so far). Confirm your windows above.</div>`
         }
         // Engineering figures on tap — the real coefficients, not the plain-English gloss.
         let eng = `<div class="th-row"><span>Overall half-life</span><span>~${h}h to halve an indoor–outdoor gap</span></div>` +
