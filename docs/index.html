@@ -823,6 +823,13 @@
           const cov = d.model_samples ? Math.round((d.model_confirmed || 0) / d.model_samples * 100) : 0
           html += `<div class="th-note">Open-vs-shut split unlocks once enough real window states are logged (${cov}% so far) — confirm your windows above to sharpen it.</div>`
         }
+        // Inferred blinds effect: measured once there's sunny data with blinds both up & down.
+        const be = d.blinds_effect
+        if (be && be.ok && be.eff != null) {
+          html += `<div class="th-row"><span>🕶️ South blinds</span><span>block ~${Math.round(be.eff * 100)}% of solar (measured)</span></div>`
+        } else if (be) {
+          html += `<div class="th-note">Blinds' solar-blocking is estimated at ~85% (seeded). To *measure* it, log blinds on sunny days both up and down — got ${be.n_up || 0} sunny "up" · ${be.n_down || 0} "down" so far (need ~30 each).</div>`
+        }
         thEl.innerHTML = html
       } else {
         thEl.style.display = "none"

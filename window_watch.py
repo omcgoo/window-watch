@@ -174,12 +174,14 @@ def load_calibration():
     cal = {k: {"a": v["a"], "b": v["b"], "c": v["c"], "n": 0, "rmse": None}
            for k, v in CAL_DEFAULTS.items()}
     cal["_coverage"] = {"confirmed": 0, "total": 0}
+    cal["_blinds"] = {"ok": False, "eff": None, "n_up": 0, "n_down": 0}
     try:
         with open(CALIBRATION_FILE) as f:
             fitted = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return cal
     cal["_coverage"] = fitted.get("_coverage") or cal["_coverage"]
+    cal["_blinds"] = fitted.get("_blinds") or cal["_blinds"]
     K = CAL_PRIOR_WEIGHT
     for regime, seed in CAL_DEFAULTS.items():
         f_r = fitted.get(regime) or {}
@@ -465,13 +467,17 @@ def calibrate_from_history():
         # solar term sees effective solar. Keeps shaded days from dragging the coefficient
         # toward zero and lets shaded/unshaded days both inform one clean b.
         solar_eff = solar * BLIND_FACTOR if blind == "down" else solar
-        rows.append((ts, outdoor, solar_eff, indoor, status, out_rh, in_rh, win))
+        rows.append((ts, outdoor, solar_eff, indoor, status, out_rh, in_rh, win, blind, solar))
 
     acc = {r: dict(S11=0.0, S12=0.0, S22=0.0, Sy1=0.0, Sy2=0.0, n=0,
                    Hxx=0.0, Hxy=0.0, n_h=0, pairs=[])
            for r in ("open", "closed")}
+    # Blinds inference: sunny pairs whose blinds state is *confirmed*, kept as
+    # (regime, x_gap, x_rawsolar, Δ) so we can later strip conductance with the fitted a
+    # and fit the solar response separately for shaded vs exposed → the real blinds effect.
+    blind_buckets = {"up": [], "down": []}
     total_pairs = confirmed_pairs = 0
-    for (t0, o0, s0, i0, st0, orh0, irh0, win0), (t1, _o1, _s1, i1, _st1, _orh1, irh1, _win1) in zip(rows, rows[1:]):
+    for (t0, o0, s0, i0, st0, orh0, irh0, win0, blind0, raws0), (t1, _o1, _s1, i1, _st1, _orh1, irh1, _w1, _b1, _rs1) in zip(rows, rows[1:]):
         dt = (t1 - t0).total_seconds() / 3600.0
         if dt <= 0 or dt > 1.5:          # skip overnight gaps and duplicate runs
             continue
@@ -487,6 +493,8 @@ def calibrate_from_history():
         a["S11"] += x1 * x1; a["S12"] += x1 * x2; a["S22"] += x2 * x2
         a["Sy1"] += x1 * y;  a["Sy2"] += x2 * y;  a["n"] += 1
         a["pairs"].append((x1, x2, y))   # kept to score the fit's one-step error afterwards
+        if blind0 in ("up", "down") and raws0 > 150:   # need real sun + a confirmed blind state
+            blind_buckets[blind0].append((regime, x1, raws0 * dt, y))
         # moisture: Δe_in = c·(e_out−e_in)·dt, fit in vapour-pressure space
         if orh0 is not None and irh0 is not None and irh1 is not None:
             e_out = (orh0 / 100.0) * saturation_vp(o0)
@@ -523,6 +531,29 @@ def calibrate_from_history():
         return
     # How much of the fit rests on real reported window states vs inferred defaults.
     fitted["_coverage"] = {"confirmed": confirmed_pairs, "total": total_pairs}
+
+    # Blinds effectiveness — inferred, not seeded. Strip conductance with each pair's
+    # fitted a, then least-squares the residual solar response for shaded vs exposed:
+    #   resid = Δ − a·gap ≈ b·(solar·dt).  eff = 1 − b_down/b_up.
+    # Needs *contrast* — enough confirmed sunny pairs in BOTH states — else stays dormant.
+    def fit_solar_b(bucket):
+        sxx = sxy = 0.0
+        for regime, x_gap, x_sun, y in bucket:
+            a = fitted.get(regime, {}).get("a")
+            if a is None:
+                continue
+            resid = y - a * x_gap
+            sxx += x_sun * x_sun
+            sxy += resid * x_sun
+        return (sxy / sxx if sxx > 1e-9 else None), len(bucket)
+    b_up, n_up = fit_solar_b(blind_buckets["up"])
+    b_down, n_down = fit_solar_b(blind_buckets["down"])
+    blinds = {"n_up": n_up, "n_down": n_down, "ok": False, "eff": None}
+    if n_up >= 30 and n_down >= 30 and b_up and b_up > 0 and b_down is not None:
+        eff = 1.0 - max(0.0, b_down) / b_up
+        blinds.update(eff=round(max(0.0, min(1.0, eff)), 2),
+                      b_up=round(b_up, 7), b_down=round(max(0.0, b_down), 7), ok=True)
+    fitted["_blinds"] = blinds
     try:
         with open(CALIBRATION_FILE, "w") as f:
             json.dump(fitted, f, indent=2)
@@ -742,7 +773,7 @@ def notify(title, body, tags, priority="default", actions=None):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None, blinds_actual=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None, blinds_actual=None, blinds_effect=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -771,6 +802,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "thermal": thermal,
                     "window_actual": window_actual,
                     "blinds_actual": blinds_actual,
+                    "blinds_effect": blinds_effect,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -1006,6 +1038,7 @@ def main():
     model_rmse, model_samples = model_accuracy(cal)
     model_confirmed = cal.get("_coverage", {}).get("confirmed", 0)   # rows backed by a real report
     thermal = thermal_summary(cal, model_confirmed)   # heating/cooling rates for display
+    blinds_effect = cal.get("_blinds")   # inferred blinds solar-blocking (dormant until enough contrast)
 
     # Two solar thresholds: the sun that starts warming the room through the glass
     # (close blinds), and the higher sun that warms the air against the south wall
@@ -1050,7 +1083,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect)
         save_state(state)
         return
 
@@ -1135,7 +1168,7 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect)
     log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime)
 
 
