@@ -82,11 +82,21 @@
     .solar-advisory .sa-act b { font-weight: 700; }
     .solar-advisory .sa-act.soft { opacity: 0.75; font-size: 13px; }
     .solar-advisory .sub { display: block; margin-top: 6px; font-size: 11px; opacity: 0.5; }
-    .solar-advisory.sa-card { margin-bottom: 12px; }
+    /* Callouts sit side by side when both fire; single card spans full width */
+    .sa-row { display: grid; grid-template-columns: 1fr; gap: 12px; margin-bottom: 12px; }
+    .sa-row.dual { grid-template-columns: 1fr 1fr; }
+    .solar-advisory.sa-card {
+      margin-bottom: 0; display: flex; flex-direction: column;
+      font-size: 13px;
+    }
+    /* Big leading icon so it's instantly clear which control the card is about */
+    .sa-icon { font-size: 30px; line-height: 1; margin-bottom: 8px; }
     /* The confirm nudge docks inside its callout while it's active */
     .sa-log:empty { display: none; }
-    .sa-log { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,180,40,0.25); }
-    .sa-log .winlog { margin-bottom: 0; justify-content: flex-start; }
+    .sa-log { margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255,180,40,0.25); }
+    .sa-log > * { margin-top: 8px; }
+    .sa-log .winlog { margin-bottom: 0; margin-top: 0; justify-content: flex-start; }
+    @media (max-width: 480px) { .sa-row.dual { grid-template-columns: 1fr; } }
 
     .forecast {
       font-size: 15px;
@@ -342,13 +352,15 @@
       </div>
     </div>
     <!-- Two distinct solar callouts; each adopts its confirm nudge while active -->
-    <div class="solar-advisory sa-card" id="sa-blinds" style="display:none">
-      <div id="sa-blinds-text"></div>
-      <div class="sa-log" id="sa-blinds-log"></div>
-    </div>
-    <div class="solar-advisory sa-card" id="sa-windows" style="display:none">
-      <div id="sa-windows-text"></div>
-      <div class="sa-log" id="sa-windows-log"></div>
+    <div class="sa-row" id="sa-row">
+      <div class="solar-advisory sa-card" id="sa-blinds" style="display:none">
+        <div id="sa-blinds-text"></div>
+        <div class="sa-log" id="sa-blinds-log"></div>
+      </div>
+      <div class="solar-advisory sa-card" id="sa-windows" style="display:none">
+        <div id="sa-windows-text"></div>
+        <div class="sa-log" id="sa-windows-log"></div>
+      </div>
     </div>
     <div class="forecast" id="forecast" style="display:none"></div>
     <div id="log-home">
@@ -773,12 +785,14 @@
       const blindlogEl = document.getElementById("blindlog")
       const solarActive = s !== "close" && sNow != null && sThr != null && sNow >= sThr && sNow >= 80
       const windowsActive = solarActive && wThr != null && sNow >= wThr
+      document.getElementById("sa-row").className = "sa-row" + (windowsActive ? " dual" : "")
       if (solarActive) {
         const gapTxt = (indoor != null && outdoor != null && indoor > outdoor)
           ? ` (it's ${(indoor - outdoor).toFixed(1)}° cooler out)` : ""
         blindsCard.style.display = ""
         document.getElementById("sa-blinds-text").innerHTML =
-          `<div class="sa-act">🕶 <b>Blinds down</b> — the sun is warming the room through the glass${gapTxt}</div>` +
+          `<div class="sa-icon">🕶</div>` +
+          `<div class="sa-act"><b>Blinds down</b> — the sun is warming the room through the glass${gapTxt}</div>` +
           `<span class="sub">sun now ${Math.round(sNow)} W/m² · blinds help past ~${sThr}` +
           (!windowsActive && wThr != null ? ` · windows can stay open — outside air is still cooler` : "") + `</span>`
         document.getElementById("sa-blinds-log").appendChild(blindlogEl)
@@ -789,7 +803,8 @@
         // Strong sun: the south wall is warming the air outside it too — shut windows.
         windowsCard.style.display = ""
         document.getElementById("sa-windows-text").innerHTML =
-          `<div class="sa-act">🪟 <b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
+          `<div class="sa-icon">🪟</div>` +
+          `<div class="sa-act"><b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
           `<div class="sa-act soft">✅ Keep a shaded window open for airflow</div>` +
           `<span class="sub">worth shutting once sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
         document.getElementById("sa-windows-log").appendChild(winlogEl)
