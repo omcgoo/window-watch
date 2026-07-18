@@ -200,25 +200,45 @@ def sun_position(dt):
     return elev, az % 360.0
 
 
+def _facade_project(ghi, elev, az, faz):
+    """Core projection given a precomputed sun position and a facade bearing."""
+    if not ghi or ghi <= 0:
+        return 0.0
+    if elev <= 2.0:
+        return round(ghi * SOLAR_DIFFUSE, 1)
+    cos_inc = math.cos(math.radians(elev)) * math.cos(math.radians(az - faz))
+    direct = max(0.0, min(1.6, cos_inc / max(math.sin(math.radians(elev)), 0.15)))
+    return round(ghi * (SOLAR_DIFFUSE + (1.0 - SOLAR_DIFFUSE) * direct), 1)
+
+
+def facade_az():
+    """The facade bearing in use: learned from data when calibration has one,
+    else the FACADE_AZ seed. Read from file each time — the daily refit updates it."""
+    try:
+        with open(CALIBRATION_FILE) as f:
+            fa = json.load(f).get("_facade_az")
+        if fa and fa.get("learned"):
+            return float(fa["az"])
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError, KeyError):
+        pass
+    return FACADE_AZ
+
+
 def south_facade_solar(ghi, dt=None):
-    """Horizontal irradiance → effective irradiance on the (vertical) south facade.
+    """Horizontal irradiance → effective irradiance on the (vertical) main facade.
 
     Diffuse floor: the facade always sees ~SOLAR_DIFFUSE of the sky's glow, whatever
     the sun's direction. Direct part: scaled by cos(incidence)/sin(elevation) — how
     square-on the beam hits vertical glass vs how obliquely it made the horizontal
     reading — clamped so low-sun geometry can't blow up. Net effect: square-on
-    morning/midday sun counts more than the horizontal number says; evening west sun
-    (behind the facade's shoulder) drops to the diffuse floor and the solar advisory
+    morning/midday sun counts more than the horizontal number says; evening sun
+    behind the facade's shoulder drops to the diffuse floor and the solar advisory
     goes quiet even though the sky is still bright.
     """
     if not ghi or ghi <= 0:
         return 0.0
     elev, az = sun_position(dt or datetime.now(timezone.utc))
-    if elev <= 2.0:
-        return round(ghi * SOLAR_DIFFUSE, 1)
-    cos_inc = math.cos(math.radians(elev)) * math.cos(math.radians(az - FACADE_AZ))
-    direct = max(0.0, min(1.6, cos_inc / max(math.sin(math.radians(elev)), 0.15)))
-    return round(ghi * (SOLAR_DIFFUSE + (1.0 - SOLAR_DIFFUSE) * direct), 1)
+    return _facade_project(ghi, elev, az, facade_az())
 
 
 def load_calibration():
@@ -235,6 +255,7 @@ def load_calibration():
            for k, v in CAL_DEFAULTS.items()}
     cal["_coverage"] = {"confirmed": 0, "total": 0}
     cal["_blinds"] = {"ok": False, "eff": None, "n_up": 0, "n_down": 0}
+    cal["_facade_az"] = {"az": FACADE_AZ, "learned": False}
     try:
         with open(CALIBRATION_FILE) as f:
             fitted = json.load(f)
@@ -242,6 +263,7 @@ def load_calibration():
         return cal
     cal["_coverage"] = fitted.get("_coverage") or cal["_coverage"]
     cal["_blinds"] = fitted.get("_blinds") or cal["_blinds"]
+    cal["_facade_az"] = fitted.get("_facade_az") or {"az": FACADE_AZ, "learned": False}
     K = CAL_PRIOR_WEIGHT
     for regime, seed in CAL_DEFAULTS.items():
         f_r = fitted.get(regime) or {}
@@ -523,15 +545,57 @@ def calibrate_from_history():
         # rows or unreported periods. Overrides the inferred regime for calibration.
         win = parts[13].strip() if len(parts) > 13 else ""
         blind = parts[14].strip() if len(parts) > 14 else ""
-        # The CSV stores raw horizontal irradiance; project it onto the south facade at
-        # this row's timestamp so b is fitted against what the glass actually received.
-        # (Same transform live readings get — the CSV itself stays raw.)
-        solar = south_facade_solar(solar, ts)
-        # Blinds down (shaded) → only BLIND_FACTOR of the sun reaches the interior, so the
-        # solar term sees effective solar. Keeps shaded days from dragging the coefficient
-        # toward zero and lets shaded/unshaded days both inform one clean b.
-        solar_eff = solar * BLIND_FACTOR if blind == "down" else solar
-        rows.append((ts, outdoor, solar_eff, indoor, status, out_rh, in_rh, win, blind, solar))
+        # The CSV stores raw horizontal irradiance; keep it raw here plus the sun's
+        # position at this timestamp — the facade projection happens after the bearing
+        # scan below, so it can use the *learned* facade azimuth.
+        elev, saz = sun_position(ts)
+        rows.append((ts, outdoor, solar, indoor, status, out_rh, in_rh, win, blind, elev, saz))
+
+    # ---- Learn the facade bearing --------------------------------------------------
+    # The glass isn't due south, and the best bearing is an empirical question: it's the
+    # azimuth whose projected solar best explains the observed temperature steps. Scan
+    # candidates (coarse 5° then fine 1°), refit a/b per regime at each, keep the
+    # minimum-SSE bearing. Needs a decent pile of sunny pairs to be identifiable —
+    # until then the FACADE_AZ seed stands.
+    scan_pairs = []
+    for r0, r1 in zip(rows, rows[1:]):
+        dtp = (r1[0] - r0[0]).total_seconds() / 3600.0
+        if dtp <= 0 or dtp > 1.5 or r0[7] == "part":
+            continue
+        regime = r0[7] if r0[7] in ("open", "closed") else ("closed" if r0[4] == "close" else "open")
+        scan_pairs.append((regime, (r0[1] - r0[3]) * dtp, r0[2], r0[9], r0[10],
+                           r0[8] == "down", dtp, r1[3] - r0[3]))
+    sunny_n = sum(1 for p in scan_pairs if p[2] > 150)
+
+    def scan_sse(faz):
+        sums = {r: [0.0] * 5 for r in ("open", "closed")}   # S11,S12,S22,Sy1,Sy2
+        pts = {r: [] for r in ("open", "closed")}
+        for regime, x1, ghi, elev, saz, shaded, dtp, y in scan_pairs:
+            eff = _facade_project(ghi, elev, saz, faz)
+            if shaded:
+                eff *= BLIND_FACTOR
+            x2 = eff * dtp
+            s = sums[regime]
+            s[0] += x1 * x1; s[1] += x1 * x2; s[2] += x2 * x2
+            s[3] += x1 * y;  s[4] += x2 * y
+            pts[regime].append((x1, x2, y))
+        total = 0.0
+        for r in ("open", "closed"):
+            S11, S12, S22, Sy1, Sy2 = sums[r]
+            det = S11 * S22 - S12 * S12
+            if abs(det) < 1e-9 or len(pts[r]) < 2:
+                continue
+            ca = max(0.01, min(0.6, (Sy1 * S22 - Sy2 * S12) / det))
+            cb = max(0.0, min(0.005, (S11 * Sy2 - S12 * Sy1) / det))
+            total += sum((y - (ca * x1 + cb * x2)) ** 2 for x1, x2, y in pts[r])
+        return total
+
+    best_az, az_learned = FACADE_AZ, False
+    if sunny_n >= 100:
+        coarse = min(range(90, 271, 5), key=scan_sse)
+        best_az = min(range(coarse - 4, coarse + 5), key=scan_sse)
+        az_learned = True
+        print(f"Facade bearing learned: {best_az}° ({sunny_n} sunny pairs)")
 
     acc = {r: dict(S11=0.0, S12=0.0, S22=0.0, Sy1=0.0, Sy2=0.0, n=0,
                    Hxx=0.0, Hxy=0.0, n_h=0, pairs=[])
@@ -541,10 +605,14 @@ def calibrate_from_history():
     # and fit the solar response separately for shaded vs exposed → the real blinds effect.
     blind_buckets = {"up": [], "down": []}
     total_pairs = confirmed_pairs = 0
-    for (t0, o0, s0, i0, st0, orh0, irh0, win0, blind0, raws0), (t1, _o1, _s1, i1, _st1, _orh1, irh1, _w1, _b1, _rs1) in zip(rows, rows[1:]):
+    for (t0, o0, ghi0, i0, st0, orh0, irh0, win0, blind0, el0, saz0), (t1, _o1, _g1, i1, _st1, _orh1, irh1, *_r1) in zip(rows, rows[1:]):
         dt = (t1 - t0).total_seconds() / 3600.0
         if dt <= 0 or dt > 1.5:          # skip overnight gaps and duplicate runs
             continue
+        # Facade-projected solar at the learned bearing; blinds down → only BLIND_FACTOR
+        # of it reaches the interior (keeps shaded days from dragging b toward zero).
+        raws0 = _facade_project(ghi0, el0, saz0, best_az)
+        s0 = raws0 * BLIND_FACTOR if blind0 == "down" else raws0
         if win0 == "part":
             # Mixed state (sunny side shut, shaded open) — neither regime's physics.
             # Excluded entirely so it can't pollute either fit; that's its whole job.
@@ -622,6 +690,8 @@ def calibrate_from_history():
         blinds.update(eff=round(max(0.0, min(1.0, eff)), 2),
                       b_up=round(b_up, 7), b_down=round(max(0.0, b_down), 7), ok=True)
     fitted["_blinds"] = blinds
+    # The learned facade bearing — read back by facade_az() for all live projections.
+    fitted["_facade_az"] = {"az": best_az, "learned": az_learned, "sunny_pairs": sunny_n}
     try:
         with open(CALIBRATION_FILE, "w") as f:
             json.dump(fitted, f, indent=2)
@@ -851,7 +921,7 @@ def notify(title, body, tags, priority="default", actions=None):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None, blinds_actual=None, blinds_effect=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None, blinds_actual=None, blinds_effect=None, facade=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -881,6 +951,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "window_actual": window_actual,
                     "blinds_actual": blinds_actual,
                     "blinds_effect": blinds_effect,
+                    "facade": facade,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -1163,7 +1234,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect)
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect, cal.get("_facade_az"))
         save_state(state)
         return
 
@@ -1253,7 +1324,7 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect, cal.get("_facade_az"))
     log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime)
 
 

@@ -929,6 +929,9 @@
             `<div class="th-row"><span>Windows shut</span><span>~${t.shut_pct}%/hr · half-life ~${t.shut_half_h}h · holds ~${t.hold_ratio}×</span></div>`
         }
         eng += `<div class="th-row"><span>Solar gain</span><span>+${t.solar_c_hr}°C/hr at full sun (~800 W/m²)</span></div>`
+        if (d.facade && d.facade.az != null) {
+          eng += `<div class="th-row"><span>Facade bearing</span><span>~${Math.round(d.facade.az)}° ${d.facade.learned ? "(learned from your data)" : "(assumed due south)"}</span></div>`
+        }
         if (be) {
           eng += be.ok && be.eff != null
             ? `<div class="th-row"><span>Blinds effect</span><span>−${Math.round(be.eff * 100)}% solar (${be.n_up} up · ${be.n_down} down pairs)</span></div>`
