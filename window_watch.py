@@ -212,15 +212,13 @@ def _facade_project(ghi, elev, az, faz):
 
 
 def facade_az():
-    """The facade bearing in use: learned from data when calibration has one,
-    else the FACADE_AZ seed. Read from file each time — the daily refit updates it."""
-    try:
-        with open(CALIBRATION_FILE) as f:
-            fa = json.load(f).get("_facade_az")
-        if fa and fa.get("learned"):
-            return float(fa["az"])
-    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError, KeyError):
-        pass
+    """The facade bearing in use: the *measured* FACADE_AZ, always.
+
+    Blinds and windows act on radiation the instant it strikes the glass — pure
+    geometry — so live projections use the real bearing. The calibration scan still
+    fits an 'effective' bearing as a diagnostic (it sits east of measured because the
+    solid wall responds with a lag), but prediction gains from using it are ~0.3%
+    RMSE — not worth mistiming every sun-on-glass advisory by an hour or more."""
     return FACADE_AZ
 
 
@@ -255,7 +253,7 @@ def load_calibration():
            for k, v in CAL_DEFAULTS.items()}
     cal["_coverage"] = {"confirmed": 0, "total": 0}
     cal["_blinds"] = {"ok": False, "eff": None, "n_up": 0, "n_down": 0}
-    cal["_facade_az"] = {"az": FACADE_AZ, "learned": False}
+    cal["_facade_az"] = {"az": FACADE_AZ, "effective_az": None}
     try:
         with open(CALIBRATION_FILE) as f:
             fitted = json.load(f)
@@ -263,7 +261,7 @@ def load_calibration():
         return cal
     cal["_coverage"] = fitted.get("_coverage") or cal["_coverage"]
     cal["_blinds"] = fitted.get("_blinds") or cal["_blinds"]
-    cal["_facade_az"] = fitted.get("_facade_az") or {"az": FACADE_AZ, "learned": False}
+    cal["_facade_az"] = fitted.get("_facade_az") or {"az": FACADE_AZ, "effective_az": None}
     K = CAL_PRIOR_WEIGHT
     for regime, seed in CAL_DEFAULTS.items():
         f_r = fitted.get(regime) or {}
@@ -590,12 +588,15 @@ def calibrate_from_history():
             total += sum((y - (ca * x1 + cb * x2)) ** 2 for x1, x2, y in pts[r])
         return total
 
-    best_az, az_learned = FACADE_AZ, False
+    # The fit itself uses the measured bearing (see facade_az); the scan's minimum is
+    # kept as a diagnostic. Effective sits east of measured because the wall lags —
+    # the gap is a building-performance indicator, and should shrink with insulation.
+    best_az, effective_az = FACADE_AZ, None
     if sunny_n >= 100:
         coarse = min(range(90, 271, 5), key=scan_sse)
-        best_az = min(range(coarse - 4, coarse + 5), key=scan_sse)
-        az_learned = True
-        print(f"Facade bearing learned: {best_az}° ({sunny_n} sunny pairs)")
+        effective_az = min(range(coarse - 4, coarse + 5), key=scan_sse)
+        print(f"Effective solar bearing: {effective_az}° vs measured {FACADE_AZ:.0f}° "
+              f"({sunny_n} sunny pairs)")
 
     acc = {r: dict(S11=0.0, S12=0.0, S22=0.0, Sy1=0.0, Sy2=0.0, n=0,
                    Hxx=0.0, Hxy=0.0, n_h=0, pairs=[])
@@ -690,8 +691,9 @@ def calibrate_from_history():
         blinds.update(eff=round(max(0.0, min(1.0, eff)), 2),
                       b_up=round(b_up, 7), b_down=round(max(0.0, b_down), 7), ok=True)
     fitted["_blinds"] = blinds
-    # The learned facade bearing — read back by facade_az() for all live projections.
-    fitted["_facade_az"] = {"az": best_az, "learned": az_learned, "sunny_pairs": sunny_n}
+    # Measured bearing in use + the data's effective bearing (diagnostic: the gap ≈ lag).
+    fitted["_facade_az"] = {"az": FACADE_AZ, "effective_az": effective_az,
+                            "sunny_pairs": sunny_n}
     try:
         with open(CALIBRATION_FILE, "w") as f:
             json.dump(fitted, f, indent=2)

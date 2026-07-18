@@ -945,7 +945,12 @@
         }
         eng += `<div class="th-row"><span>Solar gain</span><span>+${t.solar_c_hr}°C/hr at full sun (~800 W/m²)</span></div>`
         if (d.facade && d.facade.az != null) {
-          eng += `<div class="th-row"><span>Facade bearing</span><span>~${Math.round(d.facade.az)}° ${d.facade.learned ? "(learned from your data)" : "(assumed due south)"}</span></div>`
+          let fTxt = `${Math.round(d.facade.az)}° (measured)`
+          if (d.facade.effective_az != null) {
+            const lagH = Math.round((d.facade.az - d.facade.effective_az) / 15 * 2) / 2
+            fTxt += ` · response peaks as if ~${Math.round(d.facade.effective_az)}° → wall lag ≈ ${lagH}h`
+          }
+          eng += `<div class="th-row"><span>Facade bearing</span><span>${fTxt}</span></div>`
         }
         if (be) {
           eng += be.ok && be.eff != null
