@@ -861,14 +861,19 @@
         let html = `Close before <strong>${fmtHour(cH)}</strong>`
         if (oH != null) html += ` · reopen around <strong>${fmtHour(oH)}</strong>`
         fc.innerHTML = html + peakLine
-      } else if (cH != null) {
-        // A close happened earlier and we're open again — the day's cycle is done
+      } else if (peakPast || cH != null) {
+        // Post-peak downcurve — the day's heat is behind us; tonight is for flushing.
+        // Show where the slide is heading using the remaining forecast hours.
         fc.className = "forecast"
-        fc.innerHTML = `Open through the evening — cooler outside than in` + peakLine
+        const rest = (d.forecast_hourly || []).filter(p => p[0] >= nowHour && p[1] != null)
+        const low = rest.length ? Math.round(Math.min(...rest.map(p => p[1]))) : null
+        fc.innerHTML = (low != null
+          ? `Past the peak — sliding to ~<strong>${low}°C</strong> tonight, keep flushing`
+          : `Past the peak — cooling from here, keep flushing`) + peakLine
       } else {
-        // No close ever predicted today
+        // Pre-peak on a day that never needs a close
         fc.className = "forecast"
-        fc.innerHTML = `No close needed today — outside stays cooler` + peakLine
+        fc.innerHTML = `No close expected today — outside stays cooler` + peakLine
       }
 
       document.getElementById("updated").textContent = "data " + timeAgo(d.updated_utc)

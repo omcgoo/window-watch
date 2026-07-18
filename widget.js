@@ -132,10 +132,17 @@ if (status === "close") {
 } else if (closeUpcoming) {
   fcLine = `Close before ${fmtHour(cH)}`
   if (oH != null) fcLine += ` · reopen around ${fmtHour(oH)}`
-} else if (cH != null) {
-  fcLine = "Open through the evening"
 } else {
-  fcLine = "No close needed today"
+  const peakPast = data?.forecast_peak_hour != null && nowHour > data.forecast_peak_hour
+  if (peakPast || cH != null) {
+    // Post-peak downcurve: show where tonight's slide is heading
+    const rest = (data?.forecast_hourly || []).filter(p => p[0] >= nowHour && p[1] != null)
+    fcLine = rest.length
+      ? `Sliding to ~${Math.round(Math.min(...rest.map(p => p[1])))}° tonight`
+      : "Past the peak, cooling from here"
+  } else {
+    fcLine = "No close expected today"
+  }
 }
 if (fcLine) {
   const fcText = right.addText(fcLine)
