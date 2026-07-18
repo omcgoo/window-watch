@@ -336,7 +336,7 @@ def simulate_indoor_day(forecast, cal):
 
 def estimate_indoor(forecast, cal):
     """Return estimated indoor temp at the current local hour (sensor fallback)."""
-    current_hour = datetime.now(timezone.utc).hour + 1  # UTC+1 approximates BST
+    current_hour = local_now().hour
     indoor = INDOOR_BASE
     for h, est in simulate_indoor_day(forecast, cal):
         indoor = est
@@ -399,7 +399,7 @@ def forecast_windows(forecast, cal, indoor_now=None):
     max_temp = max(t for _, t, _s, _rh in forecast)
     peak_hour = next(h for h, t, _s, _rh in forecast if t == max_temp)
     if indoor_now is not None:
-        current_hour = datetime.now(timezone.utc).hour + 1  # UTC+1 approximates BST
+        current_hour = local_now().hour
         curve = project_indoor(forecast, indoor_now, current_hour, cal)
         start = current_hour
     else:
@@ -441,7 +441,7 @@ def forecast_wetbulb_max(forecast, cal, indoor_now=None, indoor_rh_now=None):
     only hours from now forward count (the peak is still ahead in the morning brief).
     """
     if indoor_now is not None:
-        current_hour = datetime.now(timezone.utc).hour + 1  # UTC+1 approximates BST
+        current_hour = local_now().hour
         curve = project_indoor(forecast, indoor_now, current_hour, cal)
     else:
         curve = simulate_indoor_day(forecast, cal)
@@ -792,9 +792,14 @@ def current_blind_regime():
     return rep.get("state")
 
 
+def local_now():
+    """Now in Europe/London — DST-correct (BST in summer, GMT in winter)."""
+    return datetime.now(ZoneInfo("Europe/London"))
+
+
 def local_today():
-    """Today's date in Europe/London (UTC+1 approximates BST, matching the rest)."""
-    return (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%d")
+    """Today's date in Europe/London."""
+    return local_now().strftime("%Y-%m-%d")
 
 
 def window_action(state):
@@ -1061,7 +1066,7 @@ def main():
     indoor_est = INDOOR_BASE
     try:
         forecast = get_forecast()
-        current_hour = datetime.now(timezone.utc).hour + 1
+        current_hour = local_now().hour
         indoor_est = (shelly["temp"] if shelly else None) or estimate_indoor(forecast, cal)
         # Chart's indoor forecast is projected forward from the *real* current reading
         # (anchored), not the whole-day sim that resets to the overnight low each night —
