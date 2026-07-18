@@ -118,23 +118,24 @@ if (data?.indoor_est_c != null) {
   right.addSpacer(5)
 }
 
-// Forecast line. Close time is frozen once passed (server-side), so in the close
-// period we show it as a "closed since" reference rather than hiding it.
+// Forecast line — mirrors the dashboard's state machine: closed (since/before +
+// reopen), close ahead, reopened for the evening, or no close needed today.
 const nowHour = new Date().getHours()
 const cH = data?.forecast_close_hour, oH = data?.forecast_open_hour
 const closeUpcoming = cH != null && cH >= nowHour
-const openUpcoming = oH != null && oH >= nowHour
 let fcLine = null
 if (status === "close") {
   fcLine = cH == null ? "Keep shut"
     : closeUpcoming ? `Close before ${fmtHour(cH)}`
     : `Closed since ${fmtHour(cH)}`
-  if (oH != null) fcLine += ` · open around ${fmtHour(oH)}`
+  if (oH != null) fcLine += ` · reopen around ${fmtHour(oH)}`
 } else if (closeUpcoming) {
   fcLine = `Close before ${fmtHour(cH)}`
-  if (oH != null) fcLine += ` · open around ${fmtHour(oH)}`
-} else if (openUpcoming) {
-  fcLine = `Open around ${fmtHour(oH)}`
+  if (oH != null) fcLine += ` · reopen around ${fmtHour(oH)}`
+} else if (cH != null) {
+  fcLine = "Open through the evening"
+} else {
+  fcLine = "No close needed today"
 }
 if (fcLine) {
   const fcText = right.addText(fcLine)
