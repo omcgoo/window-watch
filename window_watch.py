@@ -1178,28 +1178,36 @@ def main():
             notify("Window Watch running", body, tags="house,white_check_mark")
 
         elif status == "close":
-            # Anticipatory if outdoor hasn't *quite* crossed indoor yet but is climbing
+            # One action per line, matching the dashboard callouts. Blinds join in
+            # whenever the sun is actually on the south face.
+            sun_up = solar_threshold is not None and solar_now >= solar_threshold
             if outdoor < indoor_est:
-                lead = (
-                    f"Outside {outdoor:.1f}°C, about to overtake {indoor_label} and still climbing. "
-                    "Shut windows now to trap the cool while you still can."
-                )
+                win_line = (f"🪟 Windows shut — outside {outdoor:.1f}°C is about to overtake "
+                            f"{indoor_label} and still climbing; trap the cool while you can")
             else:
-                lead = (
-                    f"Outside {outdoor:.1f}°C — now warmer than {indoor_label}. "
-                    "Shut windows, doors and blinds."
-                )
-            body = lead + (f" Today {peak_ctx}." if peak_ctx else "")
-            notify("Close up now", body, tags="house,sunny", priority="high",
-                   actions=window_action("shut"))
+                win_line = (f"🪟 Windows shut — outside {outdoor:.1f}°C is now warmer than "
+                            f"{indoor_label}")
+            lines = [win_line]
+            if sun_up:
+                lines.append("🕶 Blinds down — the sun's on the south glass too")
+            if peak_ctx:
+                lines.append(f"Today {peak_ctx}")
+            acts = [a for a in ([window_action("shut")] +
+                                ([blind_action("down")] if sun_up else [])) if a]
+            notify("Close up now", "\n".join(lines), tags="house,sunny", priority="high",
+                   actions="; ".join(acts) if acts else None)
 
         elif status == "open":
-            body = (
-                f"Outside dropped to {outdoor:.1f}°C — cooler than {indoor_label}. "
-                "Open up and flush the heat out."
-            )
-            notify("Open up", body, tags="house,leaves",
-                   actions=window_action("open"))
+            # Evening flush: windows open, and blinds back up once the sun's off the glass.
+            sun_done = solar_threshold is None or solar_now < solar_threshold
+            lines = [f"🪟 Windows open — outside dropped to {outdoor:.1f}°C, cooler than "
+                     f"{indoor_label}; flush the heat out"]
+            if sun_done:
+                lines.append("🕶 Blinds up — the sun's off the glass, let the evening light in")
+            acts = [a for a in ([window_action("open")] +
+                                ([blind_action("up")] if sun_done else [])) if a]
+            notify("Open up", "\n".join(lines), tags="house,leaves",
+                   actions="; ".join(acts) if acts else None)
 
     # Solar-gain alert: indoor is climbing from sun through the glass even though it's
     # still cooler outside (so the crossover hasn't fired). Two tiers: shade first (kills
@@ -1212,23 +1220,19 @@ def main():
     if (status != "close" and indoor_rising and solar_threshold is not None
             and solar_now >= solar_threshold and not state.get("solar_warned_today")):
         windows_too = solar_window_threshold is not None and solar_now >= solar_window_threshold
+        # One action per line, mirroring the dashboard's two callouts.
+        lines = ["🕶 Blinds down — the sun's warming the room through the glass"]
         if windows_too:
-            body = (
-                f"Inside up to {indoor_real:.1f}°C and climbing. At {round(solar_now)} W/m² on the south "
-                "face the sun's heating the wall too, so the air outside it is warm — close the blinds AND "
-                "the sunny-side windows. Keep a shaded window open for air."
-            )
+            lines.append("🪟 Windows shut, sunny side — the south wall is heating the air "
+                         "just outside; venting that side adds heat. Keep a shaded window open for air")
         else:
-            body = (
-                f"Inside up to {indoor_real:.1f}°C and climbing though it's only {outdoor:.1f}°C out — "
-                "sun through the glass, not warm air. Close the blinds on the sunny side; windows can "
-                "stay open while the outside air is still cooler."
-            )
+            lines.append(f"🪟 Windows open — it's still cooler out ({outdoor:.1f}°C), let the air in")
+        lines.append(f"Inside {indoor_real:.1f}°C and climbing · south-face sun {round(solar_now)} W/m²")
         # Confirm-shut only when the advice was to shut the windows; otherwise they stay
         # open. The advice always says shade, so offer a "blinds down" confirm too.
         acts = [a for a in (window_action("shut" if windows_too else "open"),
                             blind_action("down")) if a]
-        notify("Sun's heating the flat", body, tags="sunny,warning", priority="high",
+        notify("Sun's heating the flat", "\n".join(lines), tags="sunny,warning", priority="high",
                actions="; ".join(acts) if acts else None)
         state["solar_warned_today"] = True
 
