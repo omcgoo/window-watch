@@ -943,7 +943,8 @@
       // Window nudge: assumed state is the confirmed report (fresh) if any, else the
       // inferred recommendation. A tap in the last ~35 min stands until the next cycle
       // bakes it into the Gist.
-      const inferred = s === "close" ? "closed" : "open"
+      // Strong sun advises the mixed state, so that's the default assumption there
+      const inferred = s === "close" ? "closed" : (windowsActive ? "part" : "open")
       const recentTap = winLocal && (Date.now() - winLocalTs) < 35 * 60 * 1000
       const confirmedRegime = recentTap ? winLocal : (d.window_actual || null)
       renderWinlog(confirmedRegime || inferred, !!confirmedRegime)
@@ -959,22 +960,26 @@
 
     // The window control is a nudge, not a persistent toggle: it states the current
     // assumption and asks you to confirm or correct it. `confirmed` = backed by a real
-    // report (fresh), vs running on the inferred recommendation.
+    // report (fresh), vs running on the inferred recommendation. Three states: open,
+    // shut, and 'part' (sunny side shut, shaded open — the strong-sun mixed state,
+    // which calibration sets aside rather than mislabelling).
     function renderWinlog(assumed, confirmed) {
       const el = document.getElementById("winlog")
-      const state = assumed === "closed" ? "shut" : "open"
-      const opp   = assumed === "closed" ? "open" : "shut"
+      const label = { closed: "shut", part: "part open", open: "open" }[assumed] || "open"
+      const state = assumed === "closed" ? "shut" : (assumed === "part" ? "part" : "open")
+      const others = ["open", "shut", "part"].filter(x => x !== state)
+      const btnTxt = { open: "open", shut: "shut", part: "south side shut" }
       if (confirmed) {
         el.className = "winlog confirmed"
         el.innerHTML =
-          `<span class="wl-state">🪟 windows <b>${state}</b> · confirmed</span>` +
-          `<button class="wl-mini" onclick="logWindow('${opp}')">now ${opp}?</button>`
+          `<span class="wl-state">🪟 windows <b>${label}</b> · confirmed</span>` +
+          others.map(o => `<button class="wl-mini" onclick="logWindow('${o}')">now ${btnTxt[o]}?</button>`).join("")
       } else {
         el.className = "winlog nudge"
         el.innerHTML =
-          `<span class="wl-q">windows <b>${state}</b> right now?</span>` +
+          `<span class="wl-q">windows <b>${label}</b> right now?</span>` +
           `<button class="wl-btn" onclick="logWindow('${state}')">yes</button>` +
-          `<button class="wl-btn ghost" onclick="logWindow('${opp}')">no, ${opp}</button>`
+          others.map(o => `<button class="wl-btn ghost" onclick="logWindow('${o}')">no, ${btnTxt[o]}</button>`).join("")
       }
     }
 
@@ -1017,7 +1022,7 @@
     async function logWindow(state) {
       // Optimistic: reflect the tap immediately as a confirmed state; the runner bakes it
       // into the log/Gist next cycle. Remember it so a poll in the gap doesn't clobber it.
-      winLocal = state === "open" ? "open" : "closed"
+      winLocal = state === "open" ? "open" : (state === "part" ? "part" : "closed")
       winLocalTs = Date.now()
       renderWinlog(winLocal, true)
       if (winPending) return

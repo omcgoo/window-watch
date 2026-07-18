@@ -545,6 +545,10 @@ def calibrate_from_history():
         dt = (t1 - t0).total_seconds() / 3600.0
         if dt <= 0 or dt > 1.5:          # skip overnight gaps and duplicate runs
             continue
+        if win0 == "part":
+            # Mixed state (sunny side shut, shaded open) — neither regime's physics.
+            # Excluded entirely so it can't pollute either fit; that's its whole job.
+            continue
         total_pairs += 1
         confirmed = win0 in ("open", "closed")   # regime came from a real report, not inference
         if confirmed:
@@ -722,14 +726,18 @@ def save_state(state):
 
 
 def record_window_state(state):
-    """Persist a dashboard-reported actual window state ('open' or 'shut').
+    """Persist a dashboard-reported actual window state ('open', 'shut' or 'part').
+
+    'part' = the strong-sun mixed state (sunny side shut, a shaded window open). It
+    exists to keep labels honest — those hours are neither regime's physics, so
+    calibration excludes them rather than polluting either fit.
 
     Stamps it with the recommendation in force at report time ('rec'), so the report
     can be retired the moment the app's advice next flips — that's when you'd naturally
     change the windows anyway, so a forgotten re-confirm reverts to the inferred default
     at exactly the right point.
     """
-    if state not in ("open", "shut"):
+    if state not in ("open", "shut", "part"):
         return False
     try:
         with open(WINDOW_FILE, "w") as f:
@@ -744,7 +752,7 @@ def record_window_state(state):
 
 
 def current_window_regime(current_rec=None):
-    """The reported regime ('open'/'closed') while it's still trustworthy, else None.
+    """The reported regime ('open'/'closed'/'part') while trustworthy, else None.
 
     A report is retired when the recommendation flips from what it was at report time
     (the natural moment windows change), or after WINDOW_TTL_HOURS as a backstop. Beyond
@@ -761,7 +769,8 @@ def current_window_regime(current_rec=None):
     rec0 = rep.get("rec")
     if current_rec is not None and rec0 is not None and current_rec != rec0:
         return None   # advice flipped since you reported — you'd have changed the windows
-    return "closed" if rep.get("state") == "shut" else "open"
+    st = rep.get("state")
+    return "closed" if st == "shut" else ("part" if st == "part" else "open")
 
 
 def record_blind_state(state):
@@ -811,7 +820,7 @@ def window_action(state):
     """
     if not REFRESH_TOKEN:
         return None
-    label = "Confirm shut" if state == "shut" else "Confirm open"
+    label = {"shut": "Confirm shut", "part": "Sunny side shut"}.get(state, "Confirm open")
     return (f"action=http, label={label}, url={FLY_BASE}/window?state={state}, "
             f"method=POST, headers.Authorization=Bearer {REFRESH_TOKEN}, clear=true")
 
@@ -1228,9 +1237,10 @@ def main():
         else:
             lines.append(f"🪟 Windows open — it's still cooler out ({outdoor:.1f}°C), let the air in")
         lines.append(f"Inside {indoor_real:.1f}°C and climbing · south-face sun {round(solar_now)} W/m²")
-        # Confirm-shut only when the advice was to shut the windows; otherwise they stay
-        # open. The advice always says shade, so offer a "blinds down" confirm too.
-        acts = [a for a in (window_action("shut" if windows_too else "open"),
+        # Strong sun advises the mixed state (sunny side shut, shaded open) — confirming
+        # it logs 'part', which calibration deliberately sets aside rather than
+        # mislabelling as open or shut. Moderate sun: windows genuinely stay open.
+        acts = [a for a in (window_action("part" if windows_too else "open"),
                             blind_action("down")) if a]
         notify("Sun's heating the flat", "\n".join(lines), tags="sunny,warning", priority="high",
                actions="; ".join(acts) if acts else None)
