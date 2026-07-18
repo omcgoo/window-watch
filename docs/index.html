@@ -793,7 +793,7 @@
         document.getElementById("sa-blinds-text").innerHTML =
           `<div class="sa-icon">🕶</div>` +
           `<div class="sa-act"><b>Blinds down</b> — the sun is warming the room through the glass${gapTxt}</div>` +
-          `<span class="sub">sun now ${Math.round(sNow)} W/m² · blinds help past ~${sThr}` +
+          `<span class="sub">south-face sun now ${Math.round(sNow)} W/m² · blinds help past ~${sThr}` +
           (!windowsActive && wThr != null ? ` · windows can stay open — outside air is still cooler` : "") + `</span>`
         document.getElementById("sa-blinds-log").appendChild(blindlogEl)
       } else {
@@ -806,7 +806,7 @@
           `<div class="sa-icon">🪟</div>` +
           `<div class="sa-act"><b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
           `<div class="sa-act soft">✅ Keep a shaded window open for airflow</div>` +
-          `<span class="sub">worth shutting once sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
+          `<span class="sub">worth shutting once south-face sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
         document.getElementById("sa-windows-log").appendChild(winlogEl)
       } else {
         windowsCard.style.display = "none"

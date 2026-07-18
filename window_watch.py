@@ -38,6 +38,7 @@ import sys
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 LAT = os.getenv("LAT") or "51.527"
 LON = os.getenv("LON") or "-0.021"
@@ -53,6 +54,13 @@ SOLAR_RISE = float(os.getenv("SOLAR_RISE") or "0.3")           # °C rise since 
 # sunny side adds heat, so windows must shut too — not just the blinds. Not in the
 # thermal model and we've no south-side air sensor to learn it, so it's a tunable seed.
 SOLAR_WALL_K = float(os.getenv("SOLAR_WALL_K") or "0.004")
+# The gain path is the south facade, but Open-Meteo's shortwave_radiation is on a
+# *horizontal* plane — directionless. south_facade_solar() projects it onto the facade
+# using the sun's actual position, so evening west sun stops reading as heat on the
+# south glass. FACADE_AZ = compass bearing the glass faces; SOLAR_DIFFUSE = the share
+# of horizontal irradiance the facade sees regardless of sun direction (sky glow).
+FACADE_AZ = float(os.getenv("FACADE_AZ") or "180")
+SOLAR_DIFFUSE = float(os.getenv("SOLAR_DIFFUSE") or "0.25")
 
 # Thermal/humidity model parameters, per regime. Each hour:
 #   indoor   += a * (outdoor - indoor) + b * solar_wm2          (temperature)
@@ -155,10 +163,62 @@ def get_forecast():
     temps = h["temperature_2m"]
     solar = h.get("shortwave_radiation") or [0.0] * len(temps)
     rh = h.get("relative_humidity_2m") or [50.0] * len(temps)
+    # Project each hour's horizontal irradiance onto the south facade — the surface the
+    # thermal model's b coefficient is actually about. Times are local (Europe/London).
+    tz = ZoneInfo("Europe/London")
     return [
-        (int(t.split("T")[1][:2]), float(tp), float(sw or 0.0), float(rhv if rhv is not None else 50.0))
+        (int(t.split("T")[1][:2]), float(tp),
+         south_facade_solar(float(sw or 0.0),
+                            datetime.strptime(t, "%Y-%m-%dT%H:%M").replace(tzinfo=tz)),
+         float(rhv if rhv is not None else 50.0))
         for t, tp, sw, rhv in zip(times, temps, solar, rh)
     ]
+
+
+def sun_position(dt):
+    """Sun (elevation°, azimuth° clockwise from north) at LAT/LON.
+
+    NOAA's simplified solar-position algorithm — accurate to a fraction of a degree,
+    which is far more than the facade projection needs. `dt` must be timezone-aware.
+    """
+    dt = dt.astimezone(timezone.utc)
+    lat = math.radians(float(LAT))
+    lon = float(LON)
+    frac_hour = dt.hour + dt.minute / 60.0
+    gamma = 2 * math.pi / 365.0 * (dt.timetuple().tm_yday - 1 + (frac_hour - 12) / 24.0)
+    eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
+                       - 0.014615 * math.cos(2 * gamma) - 0.040849 * math.sin(2 * gamma))
+    decl = (0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
+            - 0.006758 * math.cos(2 * gamma) + 0.000907 * math.sin(2 * gamma)
+            - 0.002697 * math.cos(3 * gamma) + 0.00148 * math.sin(3 * gamma))
+    tst = frac_hour * 60.0 + eqtime + 4.0 * lon          # true solar time, minutes
+    ha = math.radians(tst / 4.0 - 180.0)                 # hour angle
+    cos_zen = math.sin(lat) * math.sin(decl) + math.cos(lat) * math.cos(decl) * math.cos(ha)
+    elev = 90.0 - math.degrees(math.acos(max(-1.0, min(1.0, cos_zen))))
+    az = math.degrees(math.atan2(math.sin(ha),
+                                 math.cos(ha) * math.sin(lat) - math.tan(decl) * math.cos(lat))) + 180.0
+    return elev, az % 360.0
+
+
+def south_facade_solar(ghi, dt=None):
+    """Horizontal irradiance → effective irradiance on the (vertical) south facade.
+
+    Diffuse floor: the facade always sees ~SOLAR_DIFFUSE of the sky's glow, whatever
+    the sun's direction. Direct part: scaled by cos(incidence)/sin(elevation) — how
+    square-on the beam hits vertical glass vs how obliquely it made the horizontal
+    reading — clamped so low-sun geometry can't blow up. Net effect: square-on
+    morning/midday sun counts more than the horizontal number says; evening west sun
+    (behind the facade's shoulder) drops to the diffuse floor and the solar advisory
+    goes quiet even though the sky is still bright.
+    """
+    if not ghi or ghi <= 0:
+        return 0.0
+    elev, az = sun_position(dt or datetime.now(timezone.utc))
+    if elev <= 2.0:
+        return round(ghi * SOLAR_DIFFUSE, 1)
+    cos_inc = math.cos(math.radians(elev)) * math.cos(math.radians(az - FACADE_AZ))
+    direct = max(0.0, min(1.6, cos_inc / max(math.sin(math.radians(elev)), 0.15)))
+    return round(ghi * (SOLAR_DIFFUSE + (1.0 - SOLAR_DIFFUSE) * direct), 1)
 
 
 def load_calibration():
@@ -463,6 +523,10 @@ def calibrate_from_history():
         # rows or unreported periods. Overrides the inferred regime for calibration.
         win = parts[13].strip() if len(parts) > 13 else ""
         blind = parts[14].strip() if len(parts) > 14 else ""
+        # The CSV stores raw horizontal irradiance; project it onto the south facade at
+        # this row's timestamp so b is fitted against what the glass actually received.
+        # (Same transform live readings get — the CSV itself stays raw.)
+        solar = south_facade_solar(solar, ts)
         # Blinds down (shaded) → only BLIND_FACTOR of the sun reaches the interior, so the
         # solar term sees effective solar. Keeps shaded days from dragging the coefficient
         # toward zero and lets shaded/unshaded days both inform one clean b.
@@ -994,7 +1058,6 @@ def main():
     forecast_hourly = None
     wetbulb_max = wetbulb_peak_hour = None
     rising = False
-    solar_now = 0.0
     indoor_est = INDOOR_BASE
     try:
         forecast = get_forecast()
@@ -1020,9 +1083,12 @@ def main():
         temp_now = next((t for h, t, _s, _rh in forecast if h == current_hour), outdoor)
         temp_next = next((t for h, t, _s, _rh in forecast if h == current_hour + 1), temp_now)
         rising = temp_next >= temp_now
-        solar_now = next((s for h, _t, s, _rh in forecast if h == current_hour), 0.0)
     except Exception as e:
         print(f"[warn] Forecast fetch failed: {e}", file=sys.stderr)
+
+    # Live sun on the south facade right now — the current horizontal reading projected
+    # through the sun's actual position, matching the units the model/thresholds use.
+    solar_now = south_facade_solar(outdoor_data["solar_wm2"])
 
     # Sensor fallback for humidity: when the Shelly is offline indoor_est is
     # already a modelled temperature — pair it with a modelled RH so the
@@ -1143,8 +1209,8 @@ def main():
         windows_too = solar_window_threshold is not None and solar_now >= solar_window_threshold
         if windows_too:
             body = (
-                f"Inside up to {indoor_real:.1f}°C and climbing. At {round(solar_now)} W/m² the sun's "
-                "now heating the south wall too, so the air outside it is warm — close the blinds AND "
+                f"Inside up to {indoor_real:.1f}°C and climbing. At {round(solar_now)} W/m² on the south "
+                "face the sun's heating the wall too, so the air outside it is warm — close the blinds AND "
                 "the sunny-side windows. Keep a shaded window open for air."
             )
         else:
