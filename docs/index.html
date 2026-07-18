@@ -92,8 +92,13 @@
       margin-bottom: 0; display: flex; flex-direction: column;
       font-size: 13px;
     }
-    /* Big leading icon so it's instantly clear which control the card is about */
-    .sa-icon { font-size: 30px; line-height: 1; margin-bottom: 8px; }
+    /* Big leading icon in a left column — the text flows beside it, no dead row */
+    #sa-blinds-text, #sa-windows-text {
+      display: grid; grid-template-columns: 36px 1fr; column-gap: 10px;
+      align-items: start;
+    }
+    .sa-icon { grid-column: 1; grid-row: 1 / span 9; font-size: 26px; line-height: 1.2; }
+    #sa-blinds-text > :not(.sa-icon), #sa-windows-text > :not(.sa-icon) { grid-column: 2; }
     /* Each card carries its control's confirm nudge */
     .sa-log:empty { display: none; }
     .sa-log { margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.12); }
