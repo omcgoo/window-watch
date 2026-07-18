@@ -868,8 +868,8 @@
         const rest = (d.forecast_hourly || []).filter(p => p[0] >= nowHour && p[1] != null)
         const low = rest.length ? Math.round(Math.min(...rest.map(p => p[1]))) : null
         fc.innerHTML = (low != null
-          ? `Past the peak — sliding to ~<strong>${low}°C</strong> tonight, keep flushing`
-          : `Past the peak — cooling from here, keep flushing`) + peakLine
+          ? `Past the peak — sliding to ~<strong>${low}°C</strong> tonight, keep the windows open`
+          : `Past the peak — cooling from here, keep the windows open`) + peakLine
       } else {
         // Pre-peak on a day that never needs a close
         fc.className = "forecast"
