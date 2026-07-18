@@ -82,6 +82,11 @@
     .solar-advisory .sa-act b { font-weight: 700; }
     .solar-advisory .sa-act.soft { opacity: 0.75; font-size: 13px; }
     .solar-advisory .sub { display: block; margin-top: 6px; font-size: 11px; opacity: 0.5; }
+    .solar-advisory.sa-card { margin-bottom: 12px; }
+    /* The confirm nudge docks inside its callout while it's active */
+    .sa-log:empty { display: none; }
+    .sa-log { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,180,40,0.25); }
+    .sa-log .winlog { margin-bottom: 0; justify-content: flex-start; }
 
     .forecast {
       font-size: 15px;
@@ -336,10 +341,20 @@
         <span id="balance-outdoor-label"></span>
       </div>
     </div>
-    <div class="solar-advisory" id="solar-advisory" style="display:none"></div>
+    <!-- Two distinct solar callouts; each adopts its confirm nudge while active -->
+    <div class="solar-advisory sa-card" id="sa-blinds" style="display:none">
+      <div id="sa-blinds-text"></div>
+      <div class="sa-log" id="sa-blinds-log"></div>
+    </div>
+    <div class="solar-advisory sa-card" id="sa-windows" style="display:none">
+      <div id="sa-windows-text"></div>
+      <div class="sa-log" id="sa-windows-log"></div>
+    </div>
     <div class="forecast" id="forecast" style="display:none"></div>
-    <div class="winlog" id="winlog"></div>
-    <div class="winlog" id="blindlog"></div>
+    <div id="log-home">
+      <div class="winlog" id="winlog"></div>
+      <div class="winlog" id="blindlog"></div>
+    </div>
     <div class="updated"><span class="dot"></span><span id="updated">checking…</span><span id="checked"></span></div>
     <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">Refresh</button>
     <div class="chart-wrap" id="chart-wrap" style="display:none">
@@ -750,31 +765,40 @@
       // Solar-gain advisory: sun through the glass is strong enough to overcome the
       // open windows even though it's cooler outside. solar_threshold = (a/b)·(in−out)
       // from the learned model; it's only set server-side when it's cooler out.
-      const solarEl = document.getElementById("solar-advisory")
       const sNow = d.solar_now, sThr = d.solar_threshold, wThr = d.solar_window_threshold
-      if (s !== "close" && sNow != null && sThr != null && sNow >= sThr && sNow >= 80) {
-        solarEl.style.display = ""
+      const blindsCard = document.getElementById("sa-blinds")
+      const windowsCard = document.getElementById("sa-windows")
+      const logHome = document.getElementById("log-home")
+      const winlogEl = document.getElementById("winlog")
+      const blindlogEl = document.getElementById("blindlog")
+      const solarActive = s !== "close" && sNow != null && sThr != null && sNow >= sThr && sNow >= 80
+      const windowsActive = solarActive && wThr != null && sNow >= wThr
+      if (solarActive) {
         const gapTxt = (indoor != null && outdoor != null && indoor > outdoor)
           ? ` (it's ${(indoor - outdoor).toFixed(1)}° cooler out)` : ""
-        if (wThr != null && sNow >= wThr) {
-          // Strong sun: the south wall is warming the air outside it too — shut windows.
-          solarEl.innerHTML =
-            `<div class="sa-title">☀️ strong sun on the south side</div>` +
-            `<div class="sa-act">🕶 <b>Blinds down</b> — the sun is warming the room through the glass</div>` +
-            `<div class="sa-act">🪟 <b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
-            `<div class="sa-act soft">✅ Keep a shaded window open for airflow</div>` +
-            `<span class="sub">sun now ${Math.round(sNow)} W/m² · blinds help past ~${sThr} · windows past ~${wThr}</span>`
-        } else {
-          // Moderate sun: blinds block the gain; outside air still cooler, so vent on.
-          solarEl.innerHTML =
-            `<div class="sa-title">☀️ sun on the south side</div>` +
-            `<div class="sa-act">🕶 <b>Blinds down</b> — the sun is warming the room through the glass${gapTxt}</div>` +
-            `<div class="sa-act soft">🪟 <b>Windows can stay open</b> — the outside air is still cooler</div>` +
-            `<span class="sub">sun now ${Math.round(sNow)} W/m² · if it tops ~${wThr}, shut the sunny-side windows too</span>`
-        }
+        blindsCard.style.display = ""
+        document.getElementById("sa-blinds-text").innerHTML =
+          `<div class="sa-act">🕶 <b>Blinds down</b> — the sun is warming the room through the glass${gapTxt}</div>` +
+          `<span class="sub">sun now ${Math.round(sNow)} W/m² · blinds help past ~${sThr}` +
+          (!windowsActive && wThr != null ? ` · windows can stay open — outside air is still cooler` : "") + `</span>`
+        document.getElementById("sa-blinds-log").appendChild(blindlogEl)
       } else {
-        solarEl.style.display = "none"
+        blindsCard.style.display = "none"
       }
+      if (windowsActive) {
+        // Strong sun: the south wall is warming the air outside it too — shut windows.
+        windowsCard.style.display = ""
+        document.getElementById("sa-windows-text").innerHTML =
+          `<div class="sa-act">🪟 <b>Shut sunny-side windows</b> — the south wall is heating the air just outside, so venting that side adds heat</div>` +
+          `<div class="sa-act soft">✅ Keep a shaded window open for airflow</div>` +
+          `<span class="sub">worth shutting once sun tops ~${wThr} W/m² — it's ${Math.round(sNow)} now</span>`
+        document.getElementById("sa-windows-log").appendChild(winlogEl)
+      } else {
+        windowsCard.style.display = "none"
+      }
+      // Send the nudges back to their usual spot when not docked in a callout
+      if (!windowsActive) logHome.appendChild(winlogEl)
+      if (!solarActive) logHome.appendChild(blindlogEl)
 
       // Forecast block. The close time is frozen once it's passed (server-side),
       // so during the close period we show it as a "closed since" reference rather
