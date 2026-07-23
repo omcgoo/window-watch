@@ -600,11 +600,16 @@ def calibrate_from_history():
 
     acc = {r: dict(S11=0.0, S12=0.0, S22=0.0, Sy1=0.0, Sy2=0.0, n=0,
                    Hxx=0.0, Hxy=0.0, n_h=0, pairs=[])
-           for r in ("open", "closed")}
-    # Blinds inference: sunny pairs whose blinds state is *confirmed*, kept as
-    # (regime, x_gap, x_rawsolar, Δ) so we can later strip conductance with the fitted a
-    # and fit the solar response separately for shaded vs exposed → the real blinds effect.
-    blind_buckets = {"up": [], "down": []}
+           for r in ("open", "closed", "part")}
+    # Blinds inference: sunny pairs whose blinds state is *confirmed*, bucketed by
+    # (window regime × blind state). Ventilation dilutes the measured solar response —
+    # sun-heated air leaves through an open window before the sensor sees it — so b is
+    # regime-dependent, and comparing shaded vs exposed *across* regimes would confound
+    # blinds with windows. Within a regime the dilution is the same in both blind states
+    # and cancels in the ratio. 'part' counts here: mixed ventilation is excluded from
+    # the open/closed prediction fits, but it's a regime like any other for this contrast
+    # — and strong-sun days are lived mostly in it, so it's where the evidence is.
+    blind_buckets = {r: {"up": [], "down": []} for r in ("open", "closed", "part")}
     total_pairs = confirmed_pairs = 0
     for (t0, o0, ghi0, i0, st0, orh0, irh0, win0, blind0, el0, saz0), (t1, _o1, _g1, i1, _st1, _orh1, irh1, *_r1) in zip(rows, rows[1:]):
         dt = (t1 - t0).total_seconds() / 3600.0
@@ -615,8 +620,21 @@ def calibrate_from_history():
         raws0 = _facade_project(ghi0, el0, saz0, best_az)
         s0 = raws0 * BLIND_FACTOR if blind0 == "down" else raws0
         if win0 == "part":
-            # Mixed state (sunny side shut, shaded open) — neither regime's physics.
-            # Excluded entirely so it can't pollute either fit; that's its whole job.
+            # Mixed state (sunny side shut, shaded open) — neither open's nor closed's
+            # physics, so it stays out of the prediction fits and the coverage count.
+            # But it gets its own accumulator: the blinds contrast needs a conductance
+            # for the regime the pair was actually in. Blind state must be confirmed —
+            # without it we can't attenuate solar, and an unshaded assumption would
+            # smear the very contrast this exists to sharpen.
+            if blind0 not in ("up", "down"):
+                continue
+            a = acc["part"]
+            x1, x2, y = (o0 - i0) * dt, s0 * dt, i1 - i0
+            a["S11"] += x1 * x1; a["S12"] += x1 * x2; a["S22"] += x2 * x2
+            a["Sy1"] += x1 * y;  a["Sy2"] += x2 * y;  a["n"] += 1
+            a["pairs"].append((x1, x2, y))
+            if raws0 > 150:
+                blind_buckets["part"][blind0].append((x1, raws0 * dt, y))
             continue
         total_pairs += 1
         confirmed = win0 in ("open", "closed")   # regime came from a real report, not inference
@@ -631,7 +649,7 @@ def calibrate_from_history():
         a["Sy1"] += x1 * y;  a["Sy2"] += x2 * y;  a["n"] += 1
         a["pairs"].append((x1, x2, y))   # kept to score the fit's one-step error afterwards
         if blind0 in ("up", "down") and raws0 > 150:   # need real sun + a confirmed blind state
-            blind_buckets[blind0].append((regime, x1, raws0 * dt, y))
+            blind_buckets[regime][blind0].append((x1, raws0 * dt, y))
         # moisture: Δe_in = c·(e_out−e_in)·dt, fit in vapour-pressure space
         if orh0 is not None and irh0 is not None and irh1 is not None:
             e_out = (orh0 / 100.0) * saturation_vp(o0)
@@ -669,27 +687,42 @@ def calibrate_from_history():
     # How much of the fit rests on real reported window states vs inferred defaults.
     fitted["_coverage"] = {"confirmed": confirmed_pairs, "total": total_pairs}
 
-    # Blinds effectiveness — inferred, not seeded. Strip conductance with each pair's
-    # fitted a, then least-squares the residual solar response for shaded vs exposed:
-    #   resid = Δ − a·gap ≈ b·(solar·dt).  eff = 1 − b_down/b_up.
-    # Needs *contrast* — enough confirmed sunny pairs in BOTH states — else stays dormant.
-    def fit_solar_b(bucket):
+    # Blinds effectiveness — inferred, not seeded. Within each window regime: strip
+    # conductance with that regime's fitted a, then least-squares the residual solar
+    # response separately for shaded vs exposed:
+    #   resid = Δ − a·gap ≈ b·(solar·dt),   eff_regime = 1 − b_down/b_up.
+    # Same-regime contrast is the whole point: ventilation dilutes b (sun-heated air
+    # leaves through an open window before the sensor sees it), but it dilutes both
+    # blind states equally, so the ratio is clean where a cross-regime pool would
+    # confound blinds with windows. Each regime needs contrast — sunny confirmed pairs
+    # in BOTH states — to speak; verdicts pool weighted by the limiting (smaller) bucket.
+    def fit_solar_b(regime, bucket):
+        a = fitted.get(regime, {}).get("a")
+        if a is None:
+            return None, len(bucket)
         sxx = sxy = 0.0
-        for regime, x_gap, x_sun, y in bucket:
-            a = fitted.get(regime, {}).get("a")
-            if a is None:
-                continue
+        for x_gap, x_sun, y in bucket:
             resid = y - a * x_gap
             sxx += x_sun * x_sun
             sxy += resid * x_sun
         return (sxy / sxx if sxx > 1e-9 else None), len(bucket)
-    b_up, n_up = fit_solar_b(blind_buckets["up"])
-    b_down, n_down = fit_solar_b(blind_buckets["down"])
-    blinds = {"n_up": n_up, "n_down": n_down, "ok": False, "eff": None}
-    if n_up >= 30 and n_down >= 30 and b_up and b_up > 0 and b_down is not None:
-        eff = 1.0 - max(0.0, b_down) / b_up
-        blinds.update(eff=round(max(0.0, min(1.0, eff)), 2),
-                      b_up=round(b_up, 7), b_down=round(max(0.0, b_down), 7), ok=True)
+    MIN_CONTRAST = 15          # sunny pairs per blind state, within one regime
+    per_regime, n_up_total, n_down_total = {}, 0, 0
+    for regime, buckets in blind_buckets.items():
+        b_up, n_up = fit_solar_b(regime, buckets["up"])
+        b_down, n_down = fit_solar_b(regime, buckets["down"])
+        n_up_total += n_up
+        n_down_total += n_down
+        if n_up < MIN_CONTRAST or n_down < MIN_CONTRAST or not b_up or b_up <= 0 or b_down is None:
+            continue
+        eff = max(0.0, min(1.0, 1.0 - max(0.0, b_down) / b_up))
+        per_regime[regime] = {"eff": round(eff, 2), "n_up": n_up, "n_down": n_down,
+                              "b_up": round(b_up, 7), "b_down": round(max(0.0, b_down), 7)}
+    blinds = {"n_up": n_up_total, "n_down": n_down_total, "ok": False, "eff": None}
+    if per_regime:
+        w = {r: min(v["n_up"], v["n_down"]) for r, v in per_regime.items()}
+        eff = sum(per_regime[r]["eff"] * w[r] for r in per_regime) / sum(w.values())
+        blinds.update(eff=round(eff, 2), ok=True, per_regime=per_regime)
     fitted["_blinds"] = blinds
     # Measured bearing in use + the data's effective bearing (diagnostic: the gap ≈ lag).
     fitted["_facade_az"] = {"az": FACADE_AZ, "effective_az": effective_az,
