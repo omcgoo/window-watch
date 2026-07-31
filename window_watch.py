@@ -104,14 +104,21 @@ CALIBRATION_FILE = os.getenv("CALIBRATION_FILE", "calibration.json")
 # inferred" path — forgetting to re-confirm can't mislabel for long.
 WINDOW_FILE = os.getenv("WINDOW_FILE", "window_report.json")
 WINDOW_TTL_HOURS = float(os.getenv("WINDOW_TTL_HOURS") or "18")
-# Blinds are the third control — external south blinds block most solar before it hits
-# the glass. Logged like windows so calibration can separate shaded from unshaded days
-# instead of blending them into one muddy solar coefficient: when down, only BLIND_FACTOR
-# of the solar reaches the interior (external blinds cut ~85%). A tunable seed for now;
-# once enough shaded/unshaded data accrues we can learn the real figure.
+# Blinds are the third control — the south blinds cut solar before it warms the room.
+# Logged like windows so calibration can separate shaded from unshaded days instead of
+# blending them into one muddy solar coefficient: when down, only this fraction of the
+# facade solar reaches the interior.
+#
+# No longer a guess. The 0.15 seed (85% block) described *external* blinds and was ~4x
+# too generous for these: the measured figure is ~41% blocked, i.e. ~0.59 pass-through
+# (31 Jul 2026, within-regime contrast, 90% CI 26-54%, confirmed by the 31 Jul same-day
+# up→down switch). Carrying 0.15 inflated the fitted 'closed' b by 3.2x, because the fit
+# compensated for a solar input four times too small. blind_factor() prefers the value
+# the learner has actually measured; this is only the seed it falls back to.
 BLIND_FILE = os.getenv("BLIND_FILE", "blind_report.json")
 BLIND_TTL_HOURS = float(os.getenv("BLIND_TTL_HOURS") or "18")
-BLIND_FACTOR = float(os.getenv("BLIND_FACTOR") or "0.15")
+BLIND_FACTOR_ENV = os.getenv("BLIND_FACTOR")          # set to pin it; unset = learn it
+BLIND_FACTOR = float(BLIND_FACTOR_ENV or "0.59")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
@@ -279,6 +286,28 @@ def load_calibration():
     return cal
 
 
+def blind_factor(cal=None):
+    """Fraction of facade solar still reaching the room with the blinds down.
+
+    Learned, not seeded. Once a regime has sunny pairs in *both* blind states the
+    calibration measures the block directly (`_blinds.eff`), and from then on that
+    measurement — not BLIND_FACTOR — attenuates solar on the next refit. Before the
+    learner has spoken it returns the seed, so behaviour is unchanged on a cold start.
+
+    Feeding the output back into the next fit is safe: the blinds buckets score against
+    *raw* solar (see the accumulator below), so the measured eff barely depends on the
+    factor used to produce it — a 0.15→0.75 sweep moves it only 39%→40%. It settles in
+    one pass rather than chasing itself. An explicit BLIND_FACTOR env pins the value,
+    the same escape hatch FACADE_AZ has.
+    """
+    if BLIND_FACTOR_ENV is not None:
+        return BLIND_FACTOR
+    b = (cal or {}).get("_blinds") or {}
+    if b.get("ok") and b.get("eff") is not None:
+        return max(0.05, min(1.0, 1.0 - b["eff"]))
+    return BLIND_FACTOR
+
+
 def model_accuracy(cal):
     """Roll the per-regime one-step errors into a single headline.
 
@@ -331,10 +360,31 @@ def thermal_summary(cal, confirmed=0):
     }
 
 
-def thermal_step(indoor, outdoor, solar, closed, cal):
-    """Advance indoor temperature one hour under the given regime."""
+def blinds_down_for(indoor, outdoor, solar, cal):
+    """Would you be shading this hour? Mirrors the live advisory, for the sim.
+
+    The forecast already assumes you follow the *window* advice; blinds are the same
+    bargain. Shade once the sun on the glass is enough to start warming the room — and
+    whenever it's already warmer outside, because then (see solar_rise_threshold, which
+    returns None in that case) any sun at all only adds to the heat you're shutting out.
+    """
+    if not solar:
+        return False
+    thr = solar_rise_threshold(indoor, outdoor, cal)
+    return thr is None or solar >= thr
+
+
+def thermal_step(indoor, outdoor, solar, closed, cal, shaded=False):
+    """Advance indoor temperature one hour under the given regime.
+
+    `b` is the *unshaded* solar coefficient — calibration attenuates blinds-down pairs
+    before fitting it, so applying b to raw solar models a bare window. Pass shaded=True
+    for the hours you'd have the blinds down, or the sim runs pessimistic on exactly the
+    sunny afternoons it exists to predict.
+    """
     p = cal["closed" if closed else "open"]
-    return indoor + p["a"] * (outdoor - indoor) + p["b"] * (solar or 0.0)
+    sun = (solar or 0.0) * (blind_factor(cal) if shaded else 1.0)
+    return indoor + p["a"] * (outdoor - indoor) + p["b"] * sun
 
 
 def simulate_indoor_day(forecast, cal):
@@ -349,7 +399,9 @@ def simulate_indoor_day(forecast, cal):
     result = []
     for h, outdoor, solar, _rh in forecast:
         closed = outdoor >= indoor
-        indoor = thermal_step(indoor, outdoor, solar if 7 <= h <= 19 else 0.0, closed, cal)
+        sun = solar if 7 <= h <= 19 else 0.0
+        indoor = thermal_step(indoor, outdoor, sun, closed, cal,
+                              blinds_down_for(indoor, outdoor, sun, cal))
         result.append((h, round(indoor, 1)))
     return result
 
@@ -402,7 +454,9 @@ def project_indoor(forecast, indoor_now, from_hour, cal):
             continue
         if h > from_hour:
             closed = outdoor >= indoor
-            indoor = thermal_step(indoor, outdoor, solar if 7 <= h <= 19 else 0.0, closed, cal)
+            sun = solar if 7 <= h <= 19 else 0.0
+            indoor = thermal_step(indoor, outdoor, sun, closed, cal,
+                                  blinds_down_for(indoor, outdoor, sun, cal))
         result.append((h, round(indoor, 1)))
     return result
 
@@ -518,6 +572,13 @@ def calibrate_from_history():
         print(f"[warn] Calibration fetch failed: {e}", file=sys.stderr)
         return
 
+    # Attenuation applied to blinds-down pairs: the block this model last *measured*,
+    # falling back to the seed until the learner has contrast to speak. Read off disk
+    # rather than the constant so every refit sharpens on the previous one instead of
+    # re-deriving b against a fixed guess.
+    bf = blind_factor(load_calibration())
+    print(f"Blinds pass-through in use: {bf:.2f} ({(1 - bf) * 100:.0f}% blocked)")
+
     rows = []
     for line in csv.strip().splitlines()[1:]:
         parts = line.split(",")
@@ -560,6 +621,11 @@ def calibrate_from_history():
         dtp = (r1[0] - r0[0]).total_seconds() / 3600.0
         if dtp <= 0 or dtp > 1.5 or r0[7] == "part":
             continue
+        # Same blank-blinds guard as the main fit — the scan is a solar fit too, and
+        # feeding it shaded hours labelled as exposed bends the bearing it reports.
+        # Gate on raw GHI, since the projection depends on the bearing being scanned.
+        if r0[2] > 150 and r0[8] not in ("up", "down"):
+            continue
         regime = r0[7] if r0[7] in ("open", "closed") else ("closed" if r0[4] == "close" else "open")
         scan_pairs.append((regime, (r0[1] - r0[3]) * dtp, r0[2], r0[9], r0[10],
                            r0[8] == "down", dtp, r1[3] - r0[3]))
@@ -571,7 +637,7 @@ def calibrate_from_history():
         for regime, x1, ghi, elev, saz, shaded, dtp, y in scan_pairs:
             eff = _facade_project(ghi, elev, saz, faz)
             if shaded:
-                eff *= BLIND_FACTOR
+                eff *= bf
             x2 = eff * dtp
             s = sums[regime]
             s[0] += x1 * x1; s[1] += x1 * x2; s[2] += x2 * x2
@@ -615,10 +681,10 @@ def calibrate_from_history():
         dt = (t1 - t0).total_seconds() / 3600.0
         if dt <= 0 or dt > 1.5:          # skip overnight gaps and duplicate runs
             continue
-        # Facade-projected solar at the learned bearing; blinds down → only BLIND_FACTOR
-        # of it reaches the interior (keeps shaded days from dragging b toward zero).
+        # Facade-projected solar at the learned bearing; blinds down → only bf of it
+        # reaches the interior (keeps shaded days from dragging b toward zero).
         raws0 = _facade_project(ghi0, el0, saz0, best_az)
-        s0 = raws0 * BLIND_FACTOR if blind0 == "down" else raws0
+        s0 = raws0 * bf if blind0 == "down" else raws0
         if win0 == "part":
             # Mixed state (sunny side shut, shaded open) — neither open's nor closed's
             # physics, so it stays out of the prediction fits and the coverage count.
@@ -635,6 +701,14 @@ def calibrate_from_history():
             a["pairs"].append((x1, x2, y))
             if raws0 > 150:
                 blind_buckets["part"][blind0].append((x1, raws0 * dt, y))
+            continue
+        # Same guard 'part' applies, for the same reason: a blank blinds column is not
+        # evidence of blinds up. Blinds-down is the lived default and ~40% of history
+        # predates the logging, so treating blank as exposed fed the fit full sun on
+        # shaded hours — worth up to +59% on open's b depending on which way you assume.
+        # Only sun-on-glass pairs need the state; in the dark it's irrelevant and the
+        # pair still earns its keep sharpening conductance.
+        if raws0 > 150 and blind0 not in ("up", "down"):
             continue
         total_pairs += 1
         confirmed = win0 in ("open", "closed")   # regime came from a real report, not inference

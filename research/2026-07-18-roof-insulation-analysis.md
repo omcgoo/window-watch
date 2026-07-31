@@ -4,6 +4,22 @@
 logged data (~1,300 half-hourly samples, June–July 2026) via the calibrated
 first-order thermal model.*
 
+> **⚠️ Partly superseded — see
+> [2026-07-31: blinds correction and roof refit](2026-07-31-blinds-correction-and-roof-refit.md).**
+> This note assumed blinds block 85% (`BLIND_FACTOR = 0.15`). They block **~41%**. That
+> constant sat upstream of the calibration, so:
+>
+> - **§1 (effective bearing / wall lag) is retired.** The fitted bearing moves 146° → 169°
+>   once the blind handling is fixed; the "21° gap = wall lag" reading was largely an
+>   artifact. Do not baseline insulation work against it.
+> - **§2 (glass/roof split) is superseded.** `b_roof` is ~28% stronger (1.62e-4 → 2.08e-4);
+>   the glass channel collapses to ~zero in the closed regime.
+> - **§4 (insulation scenarios) is revised upward** — ~3.1 °C by day 6 of a repeated 29 July
+>   profile, vs ~2.0 °C here.
+> - **§3 (butterfly geometry) and §5 stand.**
+>
+> Kept unedited as a dated snapshot: the before/after comparison is itself the measurement.
+
 ## 1. Facade bearing: measured vs effective
 
 The south windows face **160°** (measured off the map, front-to-back). Fitting the
