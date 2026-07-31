@@ -360,10 +360,31 @@ def thermal_summary(cal, confirmed=0):
     }
 
 
-def thermal_step(indoor, outdoor, solar, closed, cal):
-    """Advance indoor temperature one hour under the given regime."""
+def blinds_down_for(indoor, outdoor, solar, cal):
+    """Would you be shading this hour? Mirrors the live advisory, for the sim.
+
+    The forecast already assumes you follow the *window* advice; blinds are the same
+    bargain. Shade once the sun on the glass is enough to start warming the room — and
+    whenever it's already warmer outside, because then (see solar_rise_threshold, which
+    returns None in that case) any sun at all only adds to the heat you're shutting out.
+    """
+    if not solar:
+        return False
+    thr = solar_rise_threshold(indoor, outdoor, cal)
+    return thr is None or solar >= thr
+
+
+def thermal_step(indoor, outdoor, solar, closed, cal, shaded=False):
+    """Advance indoor temperature one hour under the given regime.
+
+    `b` is the *unshaded* solar coefficient — calibration attenuates blinds-down pairs
+    before fitting it, so applying b to raw solar models a bare window. Pass shaded=True
+    for the hours you'd have the blinds down, or the sim runs pessimistic on exactly the
+    sunny afternoons it exists to predict.
+    """
     p = cal["closed" if closed else "open"]
-    return indoor + p["a"] * (outdoor - indoor) + p["b"] * (solar or 0.0)
+    sun = (solar or 0.0) * (blind_factor(cal) if shaded else 1.0)
+    return indoor + p["a"] * (outdoor - indoor) + p["b"] * sun
 
 
 def simulate_indoor_day(forecast, cal):
@@ -378,7 +399,9 @@ def simulate_indoor_day(forecast, cal):
     result = []
     for h, outdoor, solar, _rh in forecast:
         closed = outdoor >= indoor
-        indoor = thermal_step(indoor, outdoor, solar if 7 <= h <= 19 else 0.0, closed, cal)
+        sun = solar if 7 <= h <= 19 else 0.0
+        indoor = thermal_step(indoor, outdoor, sun, closed, cal,
+                              blinds_down_for(indoor, outdoor, sun, cal))
         result.append((h, round(indoor, 1)))
     return result
 
@@ -431,7 +454,9 @@ def project_indoor(forecast, indoor_now, from_hour, cal):
             continue
         if h > from_hour:
             closed = outdoor >= indoor
-            indoor = thermal_step(indoor, outdoor, solar if 7 <= h <= 19 else 0.0, closed, cal)
+            sun = solar if 7 <= h <= 19 else 0.0
+            indoor = thermal_step(indoor, outdoor, sun, closed, cal,
+                                  blinds_down_for(indoor, outdoor, sun, cal))
         result.append((h, round(indoor, 1)))
     return result
 
