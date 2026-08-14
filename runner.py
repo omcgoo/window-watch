@@ -21,6 +21,7 @@ os.environ.setdefault("STATE_FILE", "/data/state.json")
 os.environ.setdefault("CALIBRATION_FILE", "/data/calibration.json")
 os.environ.setdefault("WINDOW_FILE", "/data/window_report.json")
 os.environ.setdefault("BLIND_FILE", "/data/blind_report.json")
+os.environ.setdefault("HISTORY_FILE", "/data/history.csv")
 
 import window_watch as ww
 

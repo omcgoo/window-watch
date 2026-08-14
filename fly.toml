@@ -11,6 +11,12 @@ primary_region = "lhr"
   # projections and advisory timing; the daily refit also reports an *effective*
   # bearing (~139° — east of geometric because the solid wall responds with a lag).
   FACADE_AZ = "160"
+  # Zone label -> SwitchBot deviceId. DeviceIds are not secret (only SWITCHBOT_TOKEN/
+  # SWITCHBOT_SECRET are, set via `fly secrets set`). Read off via list_switchbot_devices()
+  # 2026-08-13; sensors were pre-named during pairing (see plan-yea-sprightly-pnueli.md,
+  # "Device identification & setup") so no ambiguity to warm-test — but still worth
+  # spot-checking one zone after deploy before trusting the data fully.
+  SWITCHBOT_DEVICES = '{"bedroom":"E873BA8E87E2","outside":"E59004066234","hallway_downstairs":"E49000C62351","hallway_upstairs":"E49001C6103E","loft":"E59003866417"}'
 
 [[mounts]]
   source = "window_watch_data"

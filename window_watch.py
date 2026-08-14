@@ -26,17 +26,27 @@ Config via environment variables:
   HYSTERESIS        dead band °C to prevent flapping, default 1.5
   NTFY_TOPIC        your private ntfy topic (REQUIRED)
   NTFY_SERVER       default https://ntfy.sh
-  GITHUB_TOKEN      if set, updates the dashboard Gist
+  GITHUB_TOKEN      if set, mirrors history + status to the dashboard Gist
   DAILY_SUMMARY     if "true", sends morning forecast instead of state-change check
   STATE_FILE        path to persist last state, default ./state.json
+  HISTORY_FILE      canonical history CSV, default ./history.csv (/data/... on Fly)
+  HISTORY_MIRROR_DAYS  days of history mirrored to the Gist for the chart, default 30
+  SWITCHBOT_TOKEN, SWITCHBOT_SECRET, SWITCHBOT_DEVICES
+                    zone sensors; the "outside" zone supplies the live outdoor temp
+                    when it reports, else Open-Meteo. Forecast is always Open-Meteo.
 """
 
+import base64
+import hashlib
+import hmac
 import json
 import math
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -122,11 +132,30 @@ BLIND_FACTOR = float(BLIND_FACTOR_ENV or "0.59")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
+# Canonical, unbounded history lives on disk (the Fly volume in production). The Gist
+# copy is only a bounded mirror for the dashboard chart: the Gist API silently truncates
+# file reads over 1MB, and the old read-modify-write append would have PATCHed that
+# truncated content back as the whole file, destroying everything past the cut.
+HISTORY_FILE = os.getenv("HISTORY_FILE", "history.csv")
+# 376 B/row (measured, with the zones column) x 48 runs/day ~ 18KB/day. 30 days ~ 541KB,
+# about half the 1MB ceiling — and recomputed from scratch each run, so it can't creep.
+HISTORY_MIRROR_DAYS = float(os.getenv("HISTORY_MIRROR_DAYS") or "30")
 DASHBOARD_GIST_ID = "45ba603447bbc3ec258e479f6dee6a20"
 DASHBOARD_URL = "https://omcgoo.github.io/window-watch/"
 SHELLY_AUTH_KEY = os.getenv("SHELLY_AUTH_KEY")
 SHELLY_DEVICE_ID = os.getenv("SHELLY_DEVICE_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER")
+# Zone sensors (bedroom/outside/hallways/loft). The lounge Shelly is still the only
+# *indoor* control input, but the 'outside' zone now supplies the live outdoor reading
+# when it reports — a real thermometer on the wall beats a gridded model estimate for
+# what it's doing right now. Everything else stays data-only, and the forecast is always
+# Open-Meteo. Unset -> get_zones() returns {}, and every reading falls back to the
+# forecast exactly as before these sensors existed.
+SWITCHBOT_TOKEN = os.getenv("SWITCHBOT_TOKEN")
+SWITCHBOT_SECRET = os.getenv("SWITCHBOT_SECRET")
+# zone label -> deviceId, e.g. {"bedroom":"ABC...","outside":"DEF...", ...}
+SWITCHBOT_DEVICES = json.loads(os.getenv("SWITCHBOT_DEVICES") or "{}")
+SWITCHBOT_API = "https://api.switch-bot.com/v1.1"
 # For one-tap "confirm actual window state" buttons on the push notifications.
 FLY_BASE = os.getenv("FLY_BASE", "https://window-watch-ollie.fly.dev")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN", "")
@@ -557,19 +586,12 @@ def calibrate_from_history():
     load_calibration() blends them toward the seed by count, so every extra day of data
     sharpens the model — no threshold, no cap.
     """
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        return
-    base = f"https://api.github.com/gists/{DASHBOARD_GIST_ID}"
-    req = urllib.request.Request(base)
-    req.add_header("Authorization", f"token {token}")
-    req.add_header("Accept", "application/vnd.github+json")
+    _bootstrap_history_file()
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            gist = json.load(r)
-        csv = gist["files"].get("window-watch-history.csv", {}).get("content", "")
-    except Exception as e:
-        print(f"[warn] Calibration fetch failed: {e}", file=sys.stderr)
+        with open(HISTORY_FILE) as f:
+            csv = f.read()
+    except FileNotFoundError:
+        print("Calibration: no local history yet — keeping defaults.")
         return
 
     # Attenuation applied to blinds-down pairs: the block this model last *measured*,
@@ -832,6 +854,81 @@ def get_indoor_shelly():
         return None
 
 
+def _switchbot_headers():
+    """SwitchBot v1.1 request signature: base64(HMAC-SHA256(token+t+nonce, secret))."""
+    t = str(int(time.time() * 1000))
+    nonce = str(uuid.uuid4())
+    sign = base64.b64encode(
+        hmac.new(SWITCHBOT_SECRET.encode(), (SWITCHBOT_TOKEN + t + nonce).encode(),
+                 hashlib.sha256).digest()).decode()
+    return {"Authorization": SWITCHBOT_TOKEN, "sign": sign, "t": t,
+            "nonce": nonce, "Content-Type": "application/json"}
+
+
+def list_switchbot_devices():
+    """Discovery helper: print deviceId/name/type for every device on the account.
+
+    Run this once (with SWITCHBOT_TOKEN/SECRET set) after naming each sensor in the
+    SwitchBot app, to read off the deviceIds for SWITCHBOT_DEVICES.
+    """
+    if not (SWITCHBOT_TOKEN and SWITCHBOT_SECRET):
+        print("[warn] SWITCHBOT_TOKEN/SWITCHBOT_SECRET not set", file=sys.stderr)
+        return
+    req = urllib.request.Request(f"{SWITCHBOT_API}/devices", headers=_switchbot_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            resp = json.load(r)
+        body = resp.get("body", {})
+        for d in body.get("deviceList", []) + body.get("infraredRemoteList", []):
+            print(f"{d.get('deviceId')} · {d.get('deviceName')} · {d.get('deviceType')}")
+    except Exception as e:
+        print(f"[warn] SwitchBot device list failed: {e}", file=sys.stderr)
+
+
+def switchbot_status(device_id):
+    """Return a dict of whatever scalar fields SwitchBot reports for one device.
+
+    None on any failure — mirrors get_indoor_shelly()'s resilient, print-and-continue
+    style so a single flaky/unreachable zone never breaks the run.
+    """
+    if not (SWITCHBOT_TOKEN and SWITCHBOT_SECRET):
+        return None
+    try:
+        req = urllib.request.Request(f"{SWITCHBOT_API}/devices/{device_id}/status",
+                                      headers=_switchbot_headers())
+        with urllib.request.urlopen(req, timeout=10) as r:
+            resp = json.load(r)
+        body = resp.get("body") or {}
+        out = {}
+        if "temperature" in body:
+            out["t"] = float(body["temperature"])
+        if "humidity" in body:
+            out["rh"] = float(body["humidity"])
+        if "battery" in body:
+            out["batt"] = int(body["battery"])
+        if "lightLevel" in body:
+            out["lux"] = body["lightLevel"]
+        return out or None
+    except Exception as e:
+        print(f"[warn] SwitchBot status fetch failed for {device_id}: {e}", file=sys.stderr)
+        return None
+
+
+def get_zones():
+    """Poll every configured SwitchBot zone; return {zone: {"t":..,"rh":..,...}}.
+
+    Data-only — does not feed decide()/forecast/glitch logic. Returns {} when
+    SWITCHBOT_DEVICES is unset, so the system behaves identically to before this
+    existed. Skips (not fails) any zone whose read errors.
+    """
+    zones = {}
+    for zone, device_id in SWITCHBOT_DEVICES.items():
+        reading = switchbot_status(device_id)
+        if reading is not None:
+            zones[zone] = reading
+    return zones
+
+
 def looks_like_glitch(new_temp, last_temp, last_utc):
     """True if the jump from the last reading implies a physically impossible rate.
 
@@ -1030,7 +1127,7 @@ def notify(title, body, tags, priority="default", actions=None):
         r.read()
 
 
-def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None, blinds_actual=None, blinds_effect=None, facade=None):
+def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, forecast_peak_hour=None, forecast_close_hour=None, forecast_open_hour=None, forecast_hourly=None, indoor_humidity_pct=None, indoor_estimated=False, wetbulb_max_c=None, wetbulb_peak_hour=None, solar_now=None, solar_threshold=None, solar_window_threshold=None, model_rmse=None, model_samples=None, thermal=None, window_actual=None, model_confirmed=None, blinds_actual=None, blinds_effect=None, facade=None, zones=None, outdoor_source=None):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
@@ -1040,6 +1137,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                 "content": json.dumps({
                     "status": status,
                     "outdoor_c": outdoor,
+                    "outdoor_source": outdoor_source,
                     "indoor_est_c": indoor_est_c,
                     "indoor_humidity_pct": indoor_humidity_pct,
                     "indoor_estimated": indoor_estimated,
@@ -1061,6 +1159,7 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
                     "blinds_actual": blinds_actual,
                     "blinds_effect": blinds_effect,
                     "facade": facade,
+                    "zones": zones,
                     "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }, indent=2)
             }
@@ -1085,65 +1184,167 @@ def update_dashboard(outdoor, status, indoor_est_c=None, forecast_max=None, fore
 HISTORY_HEADER = (
     "timestamp,outdoor_c,feels_like_c,outdoor_humidity_pct,"
     "wind_kmh,gusts_kmh,solar_wm2,cloud_pct,precip_mm,"
-    "indoor_c,indoor_humidity_pct,battery_pct,status,window_actual,blinds_actual\n"
+    "indoor_c,indoor_humidity_pct,battery_pct,status,window_actual,blinds_actual,zones,"
+    "outdoor_source\n"
 )
 
-def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, window_actual=None, blinds_actual=None):
-    """Append a CSV row to the history file in the dashboard Gist."""
+def _write_history_atomic(content):
+    """Write HISTORY_FILE via temp file + rename, so a mid-write kill (Fly redeploy)
+    can't leave a half-written history behind."""
+    tmp = HISTORY_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(content)
+    os.replace(tmp, HISTORY_FILE)
+
+
+def _upgrade_history_header():
+    """Rewrite the header when columns have been appended since the file was written.
+
+    Old rows keep fewer fields than the header names; that's fine — csv.DictReader
+    reports the missing trailing ones as None, and a blank column is exactly the right
+    reading for 'this row predates that measurement'. Only ever widens a header whose
+    existing columns still match, so a genuinely divergent file is left alone and
+    flagged rather than silently rewritten.
+    """
+    try:
+        with open(HISTORY_FILE) as f:
+            current = f.readline()
+        if not current or current == HISTORY_HEADER:
+            return
+        if not HISTORY_HEADER.startswith(current.rstrip("\n").rstrip(",")):
+            print(f"[warn] History header differs from the expected schema and isn't a "
+                  f"prefix of it — leaving it alone: {current.strip()}", file=sys.stderr)
+            return
+        with open(HISTORY_FILE) as f:
+            rest = f.read()[len(current):]
+        _write_history_atomic(HISTORY_HEADER + rest)
+        added = HISTORY_HEADER.strip().count(",") - current.strip().count(",")
+        print(f"History header upgraded (+{added} column(s)).")
+    except Exception as e:
+        print(f"[warn] History header upgrade failed: {e}", file=sys.stderr)
+
+
+def _bootstrap_history_file():
+    """Seed the local history from the Gist the first time it's missing.
+
+    Idempotent: once the file exists this is a single stat, so it's safe to call at the
+    top of every writer/reader on every run. On a failed fetch it deliberately leaves
+    the file absent so the next run retries — seeding an empty file instead would
+    silently discard the accumulated history the Gist still holds.
+    """
+    if os.path.exists(HISTORY_FILE):
+        _upgrade_history_header()
+        return
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        # Nothing to bootstrap from (local dev, fresh start) — a real empty beginning,
+        # not a failure, so write the header and stop retrying.
+        _write_history_atomic(HISTORY_HEADER)
+        print("History bootstrap: no GITHUB_TOKEN, starting an empty local file.")
+        return
+    try:
+        req = urllib.request.Request(f"https://api.github.com/gists/{DASHBOARD_GIST_ID}")
+        req.add_header("Authorization", f"token {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        with urllib.request.urlopen(req, timeout=20) as r:
+            gist = json.load(r)
+        f = gist["files"].get("window-watch-history.csv", {})
+        if f.get("truncated"):
+            print("[warn] Gist history came back truncated — seeding from partial data; "
+                  "rows past the cut are not recoverable from the Gist.", file=sys.stderr)
+        existing = f.get("content", "")
+    except Exception as e:
+        print(f"[warn] History bootstrap fetch failed: {e} — retrying next run", file=sys.stderr)
+        return
+    content = existing if existing.startswith("timestamp") else HISTORY_HEADER
+    if not content.endswith("\n"):
+        content += "\n"
+    _write_history_atomic(content)
+    print(f"History bootstrapped from Gist ({max(0, content.count(chr(10)) - 1)} rows).")
+
+
+def _mirror_history_to_gist():
+    """Replace the Gist's history with the last HISTORY_MIRROR_DAYS of local rows.
+
+    Full replace, not append — that's what keeps the Gist permanently under the API's
+    1MB truncation ceiling however long the local history grows. Best-effort by design:
+    the local file is the source of truth, so a failure here only leaves the dashboard
+    chart stale until the next run.
+    """
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         return
-    base = f"https://api.github.com/gists/{DASHBOARD_GIST_ID}"
-    req = urllib.request.Request(base)
-    req.add_header("Authorization", f"token {token}")
-    req.add_header("Accept", "application/vnd.github+json")
     try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_MIRROR_DAYS)
+                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = []
+        with open(HISTORY_FILE) as f:
+            next(f, None)
+            for line in f:
+                # Fixed-width ISO8601 sorts lexically, so a string compare beats parsing
+                # every row just to find the cutoff.
+                if line[:20] >= cutoff:
+                    rows.append(line.rstrip("\n"))
+        mirror = HISTORY_HEADER + "\n".join(rows) + ("\n" if rows else "")
+        payload = json.dumps({"files": {"window-watch-history.csv": {"content": mirror}}})
+        req = urllib.request.Request(f"https://api.github.com/gists/{DASHBOARD_GIST_ID}",
+                                     data=payload.encode(), method="PATCH")
+        req.add_header("Authorization", f"token {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=20) as r:
-            gist = json.load(r)
-        existing = gist["files"].get("window-watch-history.csv", {}).get("content", HISTORY_HEADER)
-        if not existing.startswith("timestamp"):
-            existing = HISTORY_HEADER
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        row = (
-            f"{ts},"
-            f"{outdoor_data['temp']},"
-            f"{outdoor_data['feels_like']},"
-            f"{outdoor_data['humidity']},"
-            f"{outdoor_data['wind_kmh']},"
-            f"{outdoor_data['gusts_kmh']},"
-            f"{outdoor_data['solar_wm2']},"
-            f"{outdoor_data['cloud_pct']},"
-            f"{outdoor_data['precip_mm']},"
-            f"{indoor_c if indoor_c is not None else ''},"
-            f"{indoor_humidity if indoor_humidity is not None else ''},"
-            f"{battery_pct if battery_pct is not None else ''},"
-            f"{status},"
-            f"{window_actual or ''},"
-            f"{blinds_actual or ''}\n"
-        )
-        import time
-        for attempt in range(3):
-            if attempt:
-                time.sleep(2 ** attempt)
-                with urllib.request.urlopen(req, timeout=20) as r:
-                    gist = json.load(r)
-                existing = gist["files"].get("window-watch-history.csv", {}).get("content", HISTORY_HEADER)
-            payload = json.dumps({"files": {"window-watch-history.csv": {"content": existing + row}}})
-            patch = urllib.request.Request(base, data=payload.encode(), method="PATCH")
-            patch.add_header("Authorization", f"token {token}")
-            patch.add_header("Accept", "application/vnd.github+json")
-            patch.add_header("Content-Type", "application/json")
-            try:
-                with urllib.request.urlopen(patch, timeout=20) as r:
-                    r.read()
-                print("History logged.")
-                break
-            except urllib.error.HTTPError as e:
-                if e.code == 409 and attempt < 2:
-                    continue
-                raise
+            r.read()
+        print(f"History mirror updated ({len(rows)} rows, last {HISTORY_MIRROR_DAYS:.0f}d).")
     except Exception as e:
-        print(f"[warn] History log failed: {e}", file=sys.stderr)
+        print(f"[warn] History mirror failed: {e}", file=sys.stderr)
+
+
+def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, window_actual=None, blinds_actual=None, zones=None, outdoor_source=None):
+    """Append a CSV row to the local history file, then mirror a recent slice to the Gist.
+
+    zones (if any) goes in a trailing CSV-quoted JSON column — index 15+, after every
+    index calibrate_from_history() reads by position, so the existing temperature/
+    humidity/blinds fits are unaffected. Any future consumer of these columns must parse
+    with the csv module (handles the quoting), not line.split(",").
+
+    outdoor_source records where outdoor_c came from. The wall sensor and Open-Meteo
+    disagree in a time-of-day-structured way (the sensor swings ~2C less over a night),
+    so a fit that pools both without knowing which is which is pooling two different
+    measurements. Older rows leave it blank, which is itself the signal: blank = the
+    forecast era, before the sensor existed.
+    """
+    _bootstrap_history_file()
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    zones_field = ""
+    if zones:
+        zones_field = '"' + json.dumps(zones).replace('"', '""') + '"'
+    row = (
+        f"{ts},"
+        f"{outdoor_data['temp']},"
+        f"{outdoor_data['feels_like']},"
+        f"{outdoor_data['humidity']},"
+        f"{outdoor_data['wind_kmh']},"
+        f"{outdoor_data['gusts_kmh']},"
+        f"{outdoor_data['solar_wm2']},"
+        f"{outdoor_data['cloud_pct']},"
+        f"{outdoor_data['precip_mm']},"
+        f"{indoor_c if indoor_c is not None else ''},"
+        f"{indoor_humidity if indoor_humidity is not None else ''},"
+        f"{battery_pct if battery_pct is not None else ''},"
+        f"{status},"
+        f"{window_actual or ''},"
+        f"{blinds_actual or ''},"
+        f"{zones_field},"
+        f"{outdoor_source or ''}\n"
+    )
+    try:
+        with open(HISTORY_FILE, "a") as f:
+            f.write(row)
+        print("History logged (local).")
+    except Exception as e:
+        print(f"[warn] Local history write failed: {e}", file=sys.stderr)
+        return
+    _mirror_history_to_gist()
 
 
 def fmt_hour(h):
@@ -1217,9 +1418,23 @@ def main():
         sys.exit("Set NTFY_TOPIC (your private ntfy topic name).")
 
     outdoor_data = get_outdoor()
-    outdoor = outdoor_data["temp"]
-
     shelly = get_indoor_shelly()
+    zones = get_zones()
+
+    # Live outdoor temp comes from the physical 'outside' sensor when it reported this
+    # run, falling back to Open-Meteo's current-conditions estimate when it didn't. The
+    # *forecast* stays entirely Open-Meteo — this only swaps the live scalar.
+    #
+    # Mutating outdoor_data["temp"] rather than just the local is deliberate: log_history()
+    # reads outdoor_data['temp'] for the outdoor_c column, so editing one place is what
+    # stops the acted-on value and the logged value (which later trains the model) from
+    # drifting apart.
+    outdoor_source = "forecast"
+    outside_zone = zones.get("outside")
+    if outside_zone and outside_zone.get("t") is not None:
+        outdoor_data["temp"] = outside_zone["t"]
+        outdoor_source = "sensor"
+    outdoor = outdoor_data["temp"]
 
     # ---- Load state early; guard against sensor glitches -----------------------
     state = load_state()
@@ -1343,7 +1558,7 @@ def main():
         daily_summary(outdoor, cal,
                       shelly["temp"] if shelly else None,
                       shelly["humidity"] if shelly else None)
-        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect, cal.get("_facade_az"))
+        update_dashboard(outdoor, last or "open", indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect, cal.get("_facade_az"), zones, outdoor_source)
         save_state(state)
         return
 
@@ -1433,8 +1648,8 @@ def main():
 
     state["status"] = status
     save_state(state)
-    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect, cal.get("_facade_az"))
-    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime)
+    update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect, cal.get("_facade_az"), zones, outdoor_source)
+    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime, zones, outdoor_source)
 
 
 if __name__ == "__main__":
