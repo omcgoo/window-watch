@@ -269,6 +269,24 @@
     .thermal .th-eng .th-row span:first-child { white-space: nowrap; }
     .thermal .th-eng .th-row span:last-child { text-align: right; }
 
+    .locations {
+      width: 100%; margin-top: 18px; padding: 12px 16px; border-radius: 10px;
+      background: rgba(255,255,255,0.05); font-size: 12px; text-align: left;
+    }
+    .locations .loc-title {
+      font-size: 10px; opacity: 0.45; letter-spacing: 0.04em;
+      text-transform: uppercase; margin-bottom: 8px;
+    }
+    .locations .loc-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: 12px; padding: 5px 0; border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .locations .loc-row:first-of-type { border-top: none; }
+    .locations .loc-name { opacity: 0.85; white-space: nowrap; }
+    .locations .loc-vals { text-align: right; font-variant-numeric: tabular-nums; }
+    .locations .loc-vals .loc-rh { opacity: 0.5; margin-left: 6px; font-size: 11px; }
+    .locations .loc-row.loc-stale .loc-vals { opacity: 0.45; font-style: italic; }
+
     .wetbulb { width: 100%; margin-top: 32px; }
     .wetbulb-head {
       display: flex; justify-content: space-between; align-items: baseline;
@@ -379,6 +397,7 @@
       <canvas id="temp-chart"></canvas>
     </div>
     <div class="model-accuracy" id="model-accuracy" style="display:none"></div>
+    <div class="locations" id="locations" style="display:none"></div>
     <div class="thermal" id="thermal-behaviour" style="display:none"></div>
     <div class="wetbulb" id="wetbulb" style="display:none">
       <div class="wetbulb-head">
@@ -619,6 +638,12 @@
     const HYSTERESIS = 1.0  // reopen band — must match Python default
     const CLOSE_LEAD = 0.5  // anticipatory close margin — must match Python default
 
+    // Shortwave (W/m²) on the south face worth shading once the windows are already
+    // shut. The open-regime solar_threshold doesn't apply here — it measures sun
+    // against ventilation cooling, and it's undefined when it's warmer outside — so
+    // the shut case needs an absolute floor on glass gain instead.
+    const SOLAR_SHADE_WM2 = 150
+
     // Wet-bulb thresholds (°C). The gauge runs from a fresh WB_MIN up to WB_DANGER,
     // where prolonged indoor exposure turns dangerous (the bar's 100%).
     const WB_DANGER = 28
@@ -788,12 +813,21 @@
       const windowsCard = document.getElementById("sa-windows")
       const winlogEl = document.getElementById("winlog")
       const blindlogEl = document.getElementById("blindlog")
-      const solarActive = s !== "close" && sNow != null && sThr != null && sNow >= sThr && sNow >= 80
-      const windowsActive = solarActive && wThr != null && sNow >= wThr
+      // Two regimes, two tests. Windows open: the sun has to beat ventilation cooling,
+      // so it's measured against the learned solar_threshold. Windows shut: that
+      // threshold is undefined (it's warmer outside), and the sun is pure gain through
+      // the glass — so an absolute floor decides it.
+      const solarActive = sNow != null && sNow >= 80 && (s === "close"
+        ? sNow >= SOLAR_SHADE_WM2
+        : sThr != null && sNow >= sThr)
+      // Sunny-side venting only makes sense while the windows are actually open.
+      const windowsActive = solarActive && s !== "close" && wThr != null && sNow >= wThr
       // Persistent state cards: blinds and windows are always visible side by side,
       // each carrying its instruction and its confirm nudge. A card turns amber only
       // while the sun genuinely demands that action; otherwise it sits neutral.
       const sunTxt = sNow != null ? `south-face sun now ${Math.round(sNow)} W/m²` : ""
+      // The bar the sub-line quotes has to be the one solarActive actually used.
+      const sShade = s === "close" ? SOLAR_SHADE_WM2 : sThr
       blindsCard.style.display = ""
       windowsCard.style.display = ""
       blindsCard.className = "solar-advisory sa-card" + (solarActive ? " alert" : "")
@@ -804,12 +838,17 @@
         document.getElementById("sa-blinds-text").innerHTML =
           `<div class="sa-act"><span class="sa-icon">🕶</span><b>Blinds down</b></div>` +
           `<div class="sa-why">the sun is warming the room through the glass${gapTxt}</div>` +
-          `<span class="sub">${sunTxt} · blinds help past ~${sThr}</span>`
+          `<span class="sub">${sunTxt} · blinds help past ~${sShade}</span>`
       } else {
+        // Don't claim the sun is off the glass when it plainly isn't — below the bar
+        // is a different statement from absent.
+        const whyTxt = sNow != null && sNow >= 80
+          ? "not enough sun on the glass to be worth it"
+          : "the sun's off the glass"
         document.getElementById("sa-blinds-text").innerHTML =
           `<div class="sa-act"><span class="sa-icon">🕶</span><b>Blinds can be up</b></div>` +
-          `<div class="sa-why">the sun's off the glass</div>` +
-          `<span class="sub">${sunTxt}${sThr != null ? ` · shade once it tops ~${sThr}` : ""}</span>`
+          `<div class="sa-why">${whyTxt}</div>` +
+          `<span class="sub">${sunTxt}${sShade != null ? ` · shade once it tops ~${sShade}` : ""}</span>`
       }
       if (windowsActive) {
         document.getElementById("sa-windows-text").innerHTML =
@@ -904,6 +943,44 @@
           `<span class="sub">from ${n.toLocaleString()} readings · ${nudge}</span>`
       } else {
         accEl.style.display = "none"
+      }
+
+      // Every measured room in one list. Labels are derived from the zone keys rather
+      // than mapped, so adding a sensor to SWITCHBOT_DEVICES shows up here on its own.
+      const locEl = document.getElementById("locations")
+      const zones = d.zones || {}
+      const zoneKeys = Object.keys(zones).filter(k => k !== "outside" && zones[k].t != null)
+      const haveLounge = d.indoor_est_c != null
+      if (haveLounge || d.outdoor_c != null || zoneKeys.length) {
+        const prettify = k => k.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())
+        const locRow = (name, temp, rh, stale) => {
+          const tTxt = temp != null ? `${stale ? "~" : ""}${temp.toFixed(1)}°C` : "—"
+          const rhTxt = rh != null ? `<span class="loc-rh">${Math.round(rh)}% rh</span>` : ""
+          return `<div class="loc-row${stale ? " loc-stale" : ""}">` +
+                 `<span class="loc-name">${name}</span>` +
+                 `<span class="loc-vals">${tTxt}${rhTxt}</span></div>`
+        }
+        let locHtml = `<div class="loc-title">locations</div>`
+        // Lounge is the Shelly control node — same fields the wet-bulb gauge reads.
+        // Italicised when it's a modelled value rather than a live reading.
+        if (haveLounge) {
+          locHtml += locRow("Lounge", d.indoor_est_c, d.indoor_humidity_pct, !!d.indoor_estimated)
+        }
+        // Outside prefers the SwitchBot reading (it carries humidity); the forecast is
+        // the fallback, and only that fallback gets called out. The label keys off which
+        // value actually got rendered rather than off outdoor_source, so the two can
+        // never contradict each other if that field is missing or stale.
+        const outZone = zones.outside
+        if (outZone || d.outdoor_c != null) {
+          locHtml += locRow("Outside" + (outZone ? "" : " (forecast)"),
+                            outZone ? outZone.t : d.outdoor_c,
+                            outZone ? outZone.rh : null, false)
+        }
+        zoneKeys.forEach(k => locHtml += locRow(prettify(k), zones[k].t, zones[k].rh, false))
+        locEl.innerHTML = locHtml
+        locEl.style.display = ""
+      } else {
+        locEl.style.display = "none"
       }
 
       // Building behaviour. Always show the split-independent overall responsiveness
