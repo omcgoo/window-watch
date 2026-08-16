@@ -1185,7 +1185,7 @@ HISTORY_HEADER = (
     "timestamp,outdoor_c,feels_like_c,outdoor_humidity_pct,"
     "wind_kmh,gusts_kmh,solar_wm2,cloud_pct,precip_mm,"
     "indoor_c,indoor_humidity_pct,battery_pct,status,window_actual,blinds_actual,zones,"
-    "outdoor_source\n"
+    "outdoor_source,outdoor_forecast_c\n"
 )
 
 def _write_history_atomic(content):
@@ -1299,7 +1299,7 @@ def _mirror_history_to_gist():
         print(f"[warn] History mirror failed: {e}", file=sys.stderr)
 
 
-def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, window_actual=None, blinds_actual=None, zones=None, outdoor_source=None):
+def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, window_actual=None, blinds_actual=None, zones=None, outdoor_source=None, outdoor_forecast_c=None):
     """Append a CSV row to the local history file, then mirror a recent slice to the Gist.
 
     zones (if any) goes in a trailing CSV-quoted JSON column — index 15+, after every
@@ -1312,6 +1312,17 @@ def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, wi
     so a fit that pools both without knowing which is which is pooling two different
     measurements. Older rows leave it blank, which is itself the signal: blank = the
     forecast era, before the sensor existed.
+
+    outdoor_forecast_c carries Open-Meteo's estimate *alongside* the sensor value, so
+    every row holds both. Without it the sensor-vs-forecast question can only be asked
+    *between* eras — comparing summer forecast rows against autumn sensor rows, where the
+    instrument change is hopelessly confounded with season, weather and regime mix. The
+    2026-08-16 placebo run made that concrete: a randomly day-shuffled split reproduced
+    the whole apparent effect, so the between-era comparison had no power at all. With
+    both values on one row it becomes a paired, within-row comparison on identical
+    weather, which is the only version of this that can actually settle anything.
+    Blank on rows logged before 2026-08-16, and blank whenever the sensor is the only
+    source available.
     """
     _bootstrap_history_file()
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1335,7 +1346,8 @@ def log_history(outdoor_data, indoor_c, indoor_humidity, battery_pct, status, wi
         f"{window_actual or ''},"
         f"{blinds_actual or ''},"
         f"{zones_field},"
-        f"{outdoor_source or ''}\n"
+        f"{outdoor_source or ''},"
+        f"{outdoor_forecast_c if outdoor_forecast_c is not None else ''}\n"
     )
     try:
         with open(HISTORY_FILE, "a") as f:
@@ -1430,6 +1442,11 @@ def main():
     # stops the acted-on value and the logged value (which later trains the model) from
     # drifting apart.
     outdoor_source = "forecast"
+    # Keep Open-Meteo's estimate before the sensor overwrites it, so the row can carry
+    # both. This is the only moment both numbers exist together — after the assignment
+    # below the forecast value is gone, and reconstructing it later means re-querying a
+    # historical archive API for every row. Cheap to keep, expensive to recover.
+    outdoor_forecast_c = outdoor_data["temp"]
     outside_zone = zones.get("outside")
     if outside_zone and outside_zone.get("t") is not None:
         outdoor_data["temp"] = outside_zone["t"]
@@ -1649,7 +1666,7 @@ def main():
     state["status"] = status
     save_state(state)
     update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect, cal.get("_facade_az"), zones, outdoor_source)
-    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime, zones, outdoor_source)
+    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime, zones, outdoor_source, outdoor_forecast_c)
 
 
 if __name__ == "__main__":
