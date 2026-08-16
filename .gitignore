@@ -1,0 +1,6 @@
+# Fly volume snapshots from backup_fly_data.sh. Deliberately NOT committed: the repo
+# lives in ProtonDrive CloudStorage, so these are already cloud-synced, and history.csv
+# grows ~18KB/day — committing dated copies would bloat the repo for no added durability.
+backups/
+
+.DS_Store
