@@ -30,10 +30,18 @@ readonly DEST="${BACKUP_ROOT}/${TODAY}"
 readonly STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-# Must match HISTORY_HEADER in window_watch.py. If the schema is widened there, this
-# check fires and the backup refuses — deliberately. A header we don't recognise means
-# either a schema change we should notice, or a corrupt pull.
-readonly EXPECTED_HEADER='timestamp,outdoor_c,feels_like_c,outdoor_humidity_pct,wind_kmh,gusts_kmh,solar_wm2,cloud_pct,precip_mm,indoor_c,indoor_humidity_pct,battery_pct,status,window_actual,blinds_actual,zones,outdoor_source'
+# Read the expected header straight out of window_watch.py rather than duplicating it.
+# The first version of this script hardcoded a copy, which went stale the moment a
+# column was appended and failed a perfectly good backup. window_watch.py is the single
+# source of truth for the schema; import is safe because its module scope is only
+# constants and os.getenv calls (stdlib imports, no network, no disk).
+EXPECTED_HEADER="$(python3 -c "
+import sys; sys.path.insert(0, '.')
+import window_watch
+print(window_watch.HISTORY_HEADER.strip())
+" 2>/dev/null)" || true
+readonly EXPECTED_HEADER
+[ -n "$EXPECTED_HEADER" ] || { echo "[FAIL] could not read HISTORY_HEADER from window_watch.py" >&2; exit 1; }
 
 # history.csv is the irreplaceable one; the rest are cheap to lose (calibration is
 # re-derivable from history, the reports and state regenerate within a run or two) so a
