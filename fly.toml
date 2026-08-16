@@ -16,7 +16,22 @@ primary_region = "lhr"
   # 2026-08-13; sensors were pre-named during pairing (see plan-yea-sprightly-pnueli.md,
   # "Device identification & setup") so no ambiguity to warm-test — but still worth
   # spot-checking one zone after deploy before trusting the data fully.
-  SWITCHBOT_DEVICES = '{"bedroom":"E873BA8E87E2","outside":"E59004066234","hallway_downstairs":"E49000C62351","hallway_upstairs":"E49001C6103E","loft":"E59003866417"}'
+  #
+  # These keys are the schema: they become the JSON keys of the history CSV's `zones`
+  # column and the dashboard's location labels. Renaming one deliberately breaks the
+  # series at that point — which is the *intended* way to mark a sensor relocation, since
+  # `zones` has no provenance column of its own (contrast outdoor_source). Two rules:
+  #   - NEVER rename "outside": window_watch.py's outdoor pick looks up that literal
+  #     string. Rename it and outdoor_c silently reverts to Open-Meteo with no error.
+  #   - Physical locations, as of 2026-08-16 (labels are historical, not descriptive):
+  #       "outside"            -> outside the BEDROOM sill, NORTH facade, permanently
+  #                               shaded. App-renamed to "north window" 2026-08-16; the
+  #                               sensor itself has never moved.
+  #       "south_window"       -> was "hallway_upstairs" (upstairs hallway) until
+  #                               2026-08-16 ~10:40Z, when it moved to the south window
+  #                               (160°, same facade as the lounge). Rows before that
+  #                               boundary carry the old key; do not pool the two.
+  SWITCHBOT_DEVICES = '{"bedroom":"E873BA8E87E2","outside":"E59004066234","hallway_downstairs":"E49000C62351","south_window":"E49001C6103E","loft":"E59003866417"}'
 
 [[mounts]]
   source = "window_watch_data"
