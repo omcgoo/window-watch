@@ -26,7 +26,9 @@ primary_region = "lhr"
   #   - Physical locations, as of 2026-08-16 (labels are historical, not descriptive):
   #       "outside"            -> outside the BEDROOM sill, NORTH facade, permanently
   #                               shaded. App-renamed to "north window" 2026-08-16; the
-  #                               sensor itself has never moved.
+  #                               sensor itself has never moved. The dashboard labels it
+  #                               "North Window" too, so key != label here on purpose —
+  #                               the key is frozen by the outdoor-pick rule above.
   #       "south_window"       -> was "hallway_upstairs" (upstairs hallway) until
   #                               2026-08-16 ~10:40Z, when it moved to the south window
   #                               (160°, same facade as the lounge). Rows before that
