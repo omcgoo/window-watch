@@ -4,3 +4,10 @@
 backups/
 
 .DS_Store
+
+# Android widget app
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/dist/

@@ -960,24 +960,36 @@
                  `<span class="loc-name">${name}</span>` +
                  `<span class="loc-vals">${tTxt}${rhTxt}</span></div>`
         }
-        let locHtml = `<div class="loc-title">locations</div>`
+        const rows = []
         // Lounge is the Shelly control node — same fields the wet-bulb gauge reads.
         // Italicised when it's a modelled value rather than a live reading.
         if (haveLounge) {
-          locHtml += locRow("Lounge", d.indoor_est_c, d.indoor_humidity_pct, !!d.indoor_estimated)
+          rows.push({ name: "Lounge", t: d.indoor_est_c, rh: d.indoor_humidity_pct,
+                      stale: !!d.indoor_estimated })
         }
-        // Outside prefers the SwitchBot reading (it carries humidity); the forecast is
-        // the fallback, and only that fallback gets called out. The label keys off which
-        // value actually got rendered rather than off outdoor_source, so the two can
-        // never contradict each other if that field is missing or stale.
+        // The "outside" zone key is load-bearing (window_watch.py looks up that literal
+        // string for the outdoor pick, see fly.toml) so it stays put, but the sensor it
+        // names sits on the bedroom sill on the north facade — hence the label. The two
+        // branches are genuinely different measurements and get different names: the
+        // Open-Meteo fallback is a gridded area estimate, not that thermometer, so it
+        // must not inherit "North Window". The label keys off which value actually got
+        // rendered, so the name and the number can never contradict each other.
         const outZone = zones.outside
-        if (outZone || d.outdoor_c != null) {
-          locHtml += locRow("Outside" + (outZone ? "" : " (forecast)"),
-                            outZone ? outZone.t : d.outdoor_c,
-                            outZone ? outZone.rh : null, false)
+        const haveOutSensor = outZone && outZone.t != null
+        if (haveOutSensor || d.outdoor_c != null) {
+          rows.push({ name: haveOutSensor ? "North Window" : "Outside (forecast)",
+                      t: haveOutSensor ? outZone.t : d.outdoor_c,
+                      rh: haveOutSensor ? outZone.rh : null, stale: false })
         }
-        zoneKeys.forEach(k => locHtml += locRow(prettify(k), zones[k].t, zones[k].rh, false))
-        locEl.innerHTML = locHtml
+        zoneKeys.forEach(k => rows.push({ name: prettify(k), t: zones[k].t, rh: zones[k].rh,
+                                          stale: false }))
+        // Coolest first, so the list reads as a ranking of where the cool air is —
+        // which is the question you're actually asking it. Rooms with no reading sink
+        // to the bottom rather than sorting as if they were 0°C.
+        rows.sort((a, b) =>
+          a.t == null || b.t == null ? (a.t == null) - (b.t == null) : a.t - b.t)
+        locEl.innerHTML = `<div class="loc-title">locations</div>` +
+                          rows.map(r => locRow(r.name, r.t, r.rh, r.stale)).join("")
         locEl.style.display = ""
       } else {
         locEl.style.display = "none"
