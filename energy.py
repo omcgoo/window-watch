@@ -34,7 +34,9 @@ pace themselves — see --pace.
 Usage:
   python energy.py solax                  # one SolaX poll
   python energy.py vaillant [--days 9]    # pull the last N days of hourly data
-  python energy.py vaillant --days 60 --pace 120   # slow backfill, 2 min between chunks
+  python energy.py vaillant --start 2025-10-01 --end 2026-05-01 --pace 120
+                                          # slow backfill, 2 min between chunks; saves each
+                                          # chunk as it lands, writes no settings snapshot
 """
 import argparse
 import asyncio
@@ -268,14 +270,23 @@ def _settings_snapshot(system):
     return snap
 
 
-async def _vaillant_fetch(days, pace):
+async def _vaillant_fetch(start, end, pace, on_chunk):
+    """Fetch hourly buckets for [start, end) in 3-day chunks, handing each chunk's rows to
+    on_chunk as it lands, so a failure part-way through keeps everything fetched so far.
+    Returns (bucket count, settings snapshots)."""
     from myPyllant.api import MyPyllantAPI
     from myPyllant.enums import DeviceDataBucketResolution
 
-    rows, snaps = {}, []
-    end = _utcnow().replace(minute=0, second=0, microsecond=0)
-    start = end - dt.timedelta(days=days)
+    n, snaps = 0, []
     async with MyPyllantAPI(VAILLANT_USER, VAILLANT_PASS, "vaillant", VAILLANT_COUNTRY) as api:
+        async def fresh_token():
+            # Vaillant's access token lives only ~5 min and myPyllant never renews it on its
+            # own, so a paced backfill died with 401 "Invalid JWT" on 2026-10-02. Renew
+            # ahead of expiry before every chunk.
+            exp = getattr(api, "oauth_session_expires", None)
+            if exp and exp - _utcnow() < dt.timedelta(minutes=2):
+                await api.refresh_token()
+
         async for system in api.get_systems():
             snaps.append(_settings_snapshot(system))
             for dev in system.devices:
@@ -284,17 +295,21 @@ async def _vaillant_fetch(days, pace):
                 a = start
                 while a < end:
                     b = min(a + dt.timedelta(days=VAILLANT_HOUR_CHUNK_DAYS), end)
+                    await fresh_token()
+                    chunk = {}
                     async for dd in api.get_data_by_device(dev, DeviceDataBucketResolution.HOUR, a, b):
                         for bucket in dd.data:
                             if bucket.value is None:
                                 continue
                             key = (bucket.start_date.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                                    dd.operation_mode, dd.energy_type)
-                            rows[key] = round(bucket.value, 3)
+                            chunk[key] = round(bucket.value, 3)
+                    on_chunk(chunk)
+                    n += len(chunk)
                     a = b
                     if pace and a < end:
                         await asyncio.sleep(pace)
-    return rows, snaps
+    return n, snaps
 
 
 def _upsert_vaillant(new_rows):
@@ -318,26 +333,40 @@ def _upsert_vaillant(new_rows):
     return len(merged)
 
 
-def vaillant_pull(days=9, pace=0):
-    """Pull the last `days` of hourly heat-pump energy plus a settings snapshot.
+def vaillant_pull(days=9, pace=0, start=None, end=None):
+    """Pull hourly heat-pump energy, by default the last `days` plus a settings snapshot.
 
     Default 9 days = three full 3-day chunks, so a weekly run overlaps the previous one
-    by two days and a single missed week loses nothing (Vaillant retains ~2 years)."""
+    by two days and a single missed week loses nothing (Vaillant retains ~2 years).
+
+    With explicit start/end (a backfill) no settings snapshot is written: the API only
+    exposes *current* settings, so filing one against a past range would be false."""
     if not (VAILLANT_USER and VAILLANT_PASS):
         return None
+    backfill = start is not None or end is not None
+    end = end or _utcnow().replace(minute=0, second=0, microsecond=0)
+    start = start or end - dt.timedelta(days=days)
+    source = "vaillant_backfill" if backfill else "vaillant"
+    total = [0]
+
+    def save(chunk):
+        total[0] = _upsert_vaillant(chunk)
+        if backfill:
+            print(f"vaillant backfill: +{len(chunk)} buckets, file now {total[0]} rows", flush=True)
+
     try:
-        rows, snaps = asyncio.run(_vaillant_fetch(days, pace))
-        total = _upsert_vaillant(rows)
-        with open(VAILLANT_SETTINGS_FILE, "a") as f:
-            for s in snaps:
-                f.write(json.dumps(s, separators=(",", ":")) + "\n")
-        detail = f"{len(rows)} buckets over {days}d, file now {total} rows"
+        n, snaps = asyncio.run(_vaillant_fetch(start, end, pace, save))
+        if not backfill:
+            with open(VAILLANT_SETTINGS_FILE, "a") as f:
+                for s in snaps:
+                    f.write(json.dumps(s, separators=(",", ":")) + "\n")
+        detail = f"{n} buckets {start:%Y-%m-%d}..{end:%Y-%m-%d}, file now {total[0]} rows"
         print(f"vaillant pull: {detail}")
-        _status("vaillant", True, detail)
-        return len(rows)
+        _status(source, True, detail)
+        return n
     except Exception as e:
         print(f"[warn] Vaillant pull failed: {e}", file=sys.stderr)
-        _status("vaillant", False, e)
+        _status(source, False, e)
         return None
 
 
@@ -347,9 +376,12 @@ if __name__ == "__main__":
     p.add_argument("--days", type=int, default=9, help="vaillant: days of hourly data to pull")
     p.add_argument("--pace", type=float, default=0,
                    help="vaillant: seconds to wait between 3-day chunks (use for backfills)")
+    p.add_argument("--start", help="vaillant backfill: start date YYYY-MM-DD (UTC)")
+    p.add_argument("--end", help="vaillant backfill: end date YYYY-MM-DD (UTC), exclusive")
     a = p.parse_args()
     if a.source == "solax":
         r = solax_poll()
         print(json.dumps(r, indent=1) if r else "no new SolaX row (unconfigured, unchanged, or failed)")
     else:
-        sys.exit(0 if vaillant_pull(a.days, a.pace) is not None else 1)
+        day = lambda s: dt.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc) if s else None
+        sys.exit(0 if vaillant_pull(a.days, a.pace, day(a.start), day(a.end)) is not None else 1)
