@@ -10,7 +10,8 @@ What it writes (all under /data on Fly, alongside history.csv):
   solax.csv              one row per new SolaX reading (~every 5 min), from the SolaX
                          Developer OpenAPI (OAuth client credentials). Columns use SolaX's
                          own field names, first non-null across the inverter and battery
-                         records; `raw` keeps both records whole. Sign conventions of
+                         records; `raw` keeps both records whole on the first row of each
+                         UTC hour only (empty otherwise, for size). Sign conventions of
                          gridPower and chargeDischargePower are NOT yet verified against this
                          install — check against a known charge window before trusting them.
                          First live read (00:13 BST, SOC 99%, grid 0 W) showed
@@ -202,16 +203,22 @@ def solax_poll():
         return None
     try:
         recs = _solax_fetch()
-        raw = json.dumps(recs, separators=(",", ":"), sort_keys=True)
-        # Dedupe on the device's own timestamp when it has one, else on the whole payload:
+        fields = {k: _first(recs, k) for k in SOLAX_FIELDS}
+        # Dedupe on the device's own timestamp when it has one, else on the logged fields:
         # the cloud only refreshes every few minutes, and repeats would fake a flat line.
         data_time = next((str(t) for t in (_first(recs, k) for k in SOLAX_TIME_KEYS) if t), "")
         last = _last_row(SOLAX_FILE)
         if last and ((data_time and last.get("data_time") == data_time)
-                     or (not data_time and last.get("raw") == raw)):
+                     or (not data_time and all(str(last.get(k)) == str(v) for k, v in fields.items()))):
             return None
-        row = {"timestamp": _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "data_time": data_time,
-               **{k: _first(recs, k) for k in SOLAX_FIELDS}, "raw": raw}
+        now = _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        # The full payload is ~3 KB (the inverter returns ~55 fields), so every-5-min raw
+        # would grow the file ~300 MB/yr and bloat every weekly backup copy. Keep it on the
+        # first row of each UTC hour only: a full sample survives for any field we later
+        # want, at ~1/12 the size.
+        first_of_hour = not last or (last.get("timestamp") or "")[:13] != now[:13]
+        raw = json.dumps(recs, separators=(",", ":"), sort_keys=True) if first_of_hour else ""
+        row = {"timestamp": now, "data_time": data_time, **fields, "raw": raw}
         new = not os.path.exists(SOLAX_FILE) or os.path.getsize(SOLAX_FILE) == 0
         with open(SOLAX_FILE, "a", newline="") as f:
             w = csv.DictWriter(f, fieldnames=SOLAX_HEADER)
