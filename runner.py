@@ -24,6 +24,7 @@ os.environ.setdefault("BLIND_FILE", "/data/blind_report.json")
 os.environ.setdefault("HISTORY_FILE", "/data/history.csv")
 
 import window_watch as ww
+import energy
 
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN", "")
 
@@ -118,9 +119,17 @@ check()
 schedule.every(30).minutes.do(check)
 schedule.every().day.at("08:10").do(morning_brief)
 
+# Energy logging lives in energy.py and never touches the advisory. Each job swallows its
+# own errors and no-ops when its credentials are unset. SolaX Cloud refreshes ~every 5
+# min (duplicates are skipped). Vaillant runs weekly at 03:30 Monday, before the 10:00
+# Monday backup pulls the files off the volume; its quota is too tight for anything chattier.
+schedule.every(5).minutes.do(energy.solax_poll)
+schedule.every().monday.at("03:30").do(energy.vaillant_pull)
+
 threading.Thread(target=serve, daemon=True).start()
 
-print("Window Watch runner started — checking every 30 min, brief at 08:10.")
+print("Window Watch runner started — checking every 30 min, brief at 08:10, "
+      "SolaX every 5 min, Vaillant weekly (Mon 03:30).")
 while True:
     schedule.run_pending()
     time.sleep(15)
