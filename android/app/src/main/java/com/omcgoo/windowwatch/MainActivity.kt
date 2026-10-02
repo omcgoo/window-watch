@@ -19,8 +19,21 @@ import android.widget.TextView
  * dashboard. Everything else happens on the home screen itself.
  */
 class MainActivity : Activity() {
+
+    /**
+     * The diagnostics line. This phone has no developer mode, so there is no adb and no
+     * logcat — if a widget goes stale, this is the only place that can say why.
+     */
+    private lateinit var status: TextView
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        status = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#8CFFFFFF"))
+            gravity = Gravity.CENTER
+            setPadding(0, 48, 0, 0)
+        }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -38,7 +51,7 @@ class MainActivity : Activity() {
 
         root.addView(TextView(this).apply {
             text = "Add the widget to your home screen to see whether the windows " +
-                "should be open or closed. It refreshes every 30 minutes."
+                "should be open or closed. It refreshes every 15 minutes."
             textSize = 15f
             setTextColor(Color.parseColor("#B0FFFFFF"))
             gravity = Gravity.CENTER
@@ -51,14 +64,49 @@ class MainActivity : Activity() {
         })
 
         root.addView(Button(this).apply {
+            text = "Refresh now"
+            setOnClickListener {
+                refreshNow(this@MainActivity)
+                android.widget.Toast.makeText(
+                    this@MainActivity, "Refreshing…", android.widget.Toast.LENGTH_SHORT).show()
+                // The worker runs off-thread; re-read shortly so the status line reflects it.
+                status.postDelayed({ status.text = statusText() }, 2_000)
+            }
+        })
+
+        root.addView(Button(this).apply {
             text = "Open dashboard"
             setOnClickListener {
                 startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(DASHBOARD_URL)))
             }
         })
 
+        root.addView(status)
+
+        // The schedule is normally started when the first widget is placed, but doing it
+        // here too means simply opening the app repairs it if it was ever lost.
+        ensureFresh(this)
+
         setContentView(root, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+
+    override fun onResume() {
+        super.onResume()
+        status.text = statusText()
+    }
+
+    /** Last good fetch, the payload's own age, and the last failure if one is outstanding. */
+    private fun statusText(): String {
+        val data = readCached(this)
+        val lines = mutableListOf(
+            if (data == null) "No data fetched yet"
+            else "Reading is ${timeAgo(data.updatedUtc)}" +
+                (if (isStale(data.updatedUtc)) " — stale" else ""),
+            "Last fetched ${timeAgo(lastSuccess(this))}",
+        )
+        lastError(this)?.let { lines += "Last error: $it" }
+        return lines.joinToString("\n")
     }
 
     /** Launchers that support pinning show a placement dialog; older ones don't respond. */
