@@ -47,7 +47,8 @@ readonly EXPECTED_HEADER
 # re-derivable from history, the reports and state regenerate within a run or two) so a
 # missing one warns rather than aborts.
 readonly CRITICAL="history.csv"
-readonly OPTIONAL=("calibration.json" "state.json" "window_report.json" "blind_report.json")
+readonly OPTIONAL=("calibration.json" "state.json" "window_report.json" "blind_report.json"
+                  "solax.csv" "vaillant_hourly.csv" "vaillant_settings.jsonl" "energy_status.json")
 
 fail() { echo "[FAIL] $*" >&2; write_last_run "FAILED: $*" "-"; exit 1; }
 warn() { echo "[warn] $*" >&2; }

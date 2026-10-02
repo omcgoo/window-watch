@@ -1,1 +1,2 @@
 schedule==1.2.2
+myPyllant==0.9.18
