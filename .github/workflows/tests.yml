@@ -1,0 +1,22 @@
+name: tests
+
+# Runs the offline test suite on every PR and on main. Nothing here touches the network
+# or any device: tests/helpers.py replaces urlopen for every test.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # matches the Dockerfile
+
+      - run: pip install -r requirements.txt
+
+      - run: python -m unittest discover -s tests -t . -v
