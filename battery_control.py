@@ -174,8 +174,12 @@ def _sn():
 
 # ---- The three jobs ---------------------------------------------------------------------
 
-def start(target=TARGET_SOC, force=False):
-    """Begin the balance charge. Every guard failing is a clean no-op, logged with why."""
+def start(target=TARGET_SOC, force=False, until=None, reason="weekly balance charge"):
+    """Begin a charge to `target`. Every guard failing is a clean no-op, logged with why.
+
+    `until` (UTC datetime) is when the watchdog ends the override; default 16:00 local
+    today, the end of the cheap slot. Free-electricity sessions pass their own end and
+    force=True, since they don't fall in the Sunday window."""
     try:
         if MODE == "off":
             return _skip("start", "BATTERY_CONTROL=off")
@@ -203,14 +207,18 @@ def start(target=TARGET_SOC, force=False):
         cmd, req_id = _command(START_PATH, body)
         if cmd in CMD_FAIL:
             en._status("battery_control", False, f"start rejected, command status {cmd}")
-            _notify("Battery balance charge didn't start",
-                    f"SolaX rejected the weekly 100% charge (status {cmd}). Nothing changed on the inverter.")
+            _notify("Battery charge didn't start",
+                    f"SolaX rejected the {reason} (status {cmd}). Nothing changed on the inverter.")
             return "failed"
-        _save({"phase": "charging", "started_utc": _iso(_now()), "start_soc": soc,
-               "request_id": req_id, "start_cmd_status": cmd, "exit_attempts": 0})
-        en._status("battery_control", True, f"start sent at SOC {soc}, command status {cmd}")
-        _notify("Battery balance charge started",
-                f"Charging to {target}% until 16:00 (currently {soc:.0f}%).", priority="low")
+        end = until or _now().astimezone(LOCAL).replace(
+            hour=WINDOW_END.hour, minute=WINDOW_END.minute, second=0, microsecond=0)
+        _save({"phase": "charging", "started_utc": _iso(_now()), "end_utc": _iso(end.astimezone(dt.timezone.utc)),
+               "reason": reason, "start_soc": soc, "request_id": req_id, "start_cmd_status": cmd,
+               "exit_attempts": 0})
+        en._status("battery_control", True, f"{reason}: start sent at SOC {soc}, command status {cmd}")
+        _notify(f"Battery charging ({reason})",
+                f"Charging to {target}% until {end.astimezone(LOCAL):%H:%M} (currently {soc:.0f}%).",
+                priority="low")
         return "started"
     except Exception as e:
         print(f"[warn] battery_control start failed: {e}", file=sys.stderr)
@@ -251,8 +259,11 @@ def watchdog():
             return None
         now = _now()
         started = _parse(state["started_utc"])
-        past_window = (now.astimezone(LOCAL).time() >= WINDOW_END or
-                       now.astimezone(LOCAL).date() != started.astimezone(LOCAL).date())
+        if state.get("end_utc"):
+            past_window = now >= _parse(state["end_utc"])
+        else:   # state written before end_utc existed
+            past_window = (now.astimezone(LOCAL).time() >= WINDOW_END or
+                           now.astimezone(LOCAL).date() != started.astimezone(LOCAL).date())
         if phase == "charging":
             return stop() if past_window else None
 
@@ -262,7 +273,7 @@ def watchdog():
             state.update(phase="done", done_utc=_iso(now), peak_soc=peak, minutes_at_99=mins)
             _save(state)
             en._status("battery_control", True, f"done: peak {peak}%, {mins} min at >=99%")
-            _notify("Battery balance charge done",
+            _notify("Battery charge done",
                     f"Peaked at {peak}%, {mins} min at 99% or above. Back to normal.", priority="low")
             return "done"
 

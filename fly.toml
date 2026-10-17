@@ -37,6 +37,9 @@ primary_region = "lhr"
   # Stays "dryrun" until a supervised live test shows the X1-Hybrid-LV accepts the
   # temporary VPP override and returns to Normal when told.
   BATTERY_CONTROL = "dryrun"
+  # Charge the battery through Octopus free-electricity sessions (octopus.py). Needs
+  # BATTERY_CONTROL="on" too; stays "off" until the battery control is proven live.
+  OCTOPUS_SESSION_CHARGE = "off"
   SWITCHBOT_DEVICES = '{"bedroom":"E873BA8E87E2","outside":"E59004066234","hallway_downstairs":"E49000C62351","south_window":"E49001C6103E","loft":"E59003866417"}'
 
 [[mounts]]

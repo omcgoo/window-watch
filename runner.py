@@ -26,6 +26,7 @@ os.environ.setdefault("HISTORY_FILE", "/data/history.csv")
 import window_watch as ww
 import energy
 import battery_control
+import octopus
 
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN", "")
 
@@ -134,11 +135,19 @@ schedule.every().sunday.at("13:05").do(battery_control.start)
 schedule.every().sunday.at("15:55").do(battery_control.stop)
 schedule.every(10).minutes.do(battery_control.watchdog)
 
+# Octopus (octopus.py): smart-meter consumption + tariff rates daily, once yesterday's
+# half-hours have landed; free-electricity sessions refreshed from the API every 30 min
+# and acted on (announce, 30-min warning, optional battery charge) every 5 min.
+schedule.every().day.at("07:30").do(octopus.pull)
+schedule.every(30).minutes.do(octopus.sessions)
+schedule.every(5).minutes.do(octopus.sessions_tick)
+
 threading.Thread(target=serve, daemon=True).start()
 
 print("Window Watch runner started — checking every 30 min, brief at 08:10, "
       "SolaX every 5 min, Vaillant weekly (Mon 03:30), "
-      f"battery balance charge Sun 13:05-15:55 [{battery_control.MODE}].")
+      f"battery balance charge Sun 13:05-15:55 [{battery_control.MODE}], "
+      f"Octopus daily 07:30 + sessions [charge {'on' if octopus.SESSION_CHARGE else 'off'}].")
 while True:
     schedule.run_pending()
     time.sleep(15)
