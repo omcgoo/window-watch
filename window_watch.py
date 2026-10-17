@@ -169,8 +169,18 @@ def get_outdoor():
         ",wind_speed_10m,wind_gusts_10m,shortwave_radiation,precipitation,cloud_cover"
         f"&temperature_unit=celsius&wind_speed_unit=kmh&models={WEATHER_MODEL}"
     )
-    with urllib.request.urlopen(url, timeout=20) as r:
-        data = json.load(r)
+    # Open-Meteo throws the odd 503 that clears within seconds; one retry absorbs those
+    # before main() has to fall back to a cached reading.
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(url, timeout=20) as r:
+                data = json.load(r)
+            break
+        except Exception as e:
+            if attempt == 2:
+                raise
+            print(f"[warn] Open-Meteo current fetch failed ({e}); retrying once", file=sys.stderr)
+            time.sleep(5)
     c = data["current"]
     return {
         "temp":       float(c["temperature_2m"]),
@@ -182,6 +192,38 @@ def get_outdoor():
         "precip_mm":  float(c["precipitation"]),
         "cloud_pct":  int(c["cloud_cover"]),
     }
+
+
+OUTDOOR_CACHE_MAX = timedelta(hours=3)
+
+
+def outdoor_fallback(cached, outside_zone):
+    """Stand-in for get_outdoor() when Open-Meteo is down: the last good reading (if under
+    OUTDOOR_CACHE_MAX old) with the outside sensor's temperature and humidity on top, or
+    the sensor alone at a pinch. Raises if there's nothing trustworthy to advise from.
+
+    Sun, wind and cloud come from the cache (or read as calm and dull with the sensor
+    alone), so main() must not log this row to history: calibration would learn from
+    stale weather. The advisory itself only needs the outdoor temperature, which the
+    sensor provides live either way."""
+    sensor_t = (outside_zone or {}).get("t")
+    sensor_rh = (outside_zone or {}).get("rh")
+    data = None
+    if cached and cached.get("data") and cached.get("utc"):
+        age = datetime.now(timezone.utc) - datetime.strptime(
+            cached["utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if age <= OUTDOOR_CACHE_MAX:
+            data = dict(cached["data"])
+    if data is None and sensor_t is not None:
+        data = {"temp": sensor_t, "feels_like": sensor_t, "humidity": 70, "wind_kmh": 0.0,
+                "gusts_kmh": 0.0, "solar_wm2": 0.0, "precip_mm": 0.0, "cloud_pct": 100}
+    if data is None:
+        raise RuntimeError("Open-Meteo down, no recent cached reading and no outside sensor")
+    if sensor_t is not None:
+        data["temp"] = sensor_t
+    if sensor_rh is not None:
+        data["humidity"] = int(sensor_rh)
+    return data
 
 
 def get_forecast():
@@ -1429,9 +1471,20 @@ def main():
     if not NTFY_TOPIC:
         sys.exit("Set NTFY_TOPIC (your private ntfy topic name).")
 
-    outdoor_data = get_outdoor()
     shelly = get_indoor_shelly()
     zones = get_zones()
+    # An Open-Meteo outage used to abort the whole cycle (no advice, no dashboard). Fall
+    # back to the last good reading plus the outside sensor; outdoor_stale then keeps
+    # this cycle out of history.csv.
+    outdoor_stale = False
+    try:
+        outdoor_data = get_outdoor()
+    except Exception as e:
+        outdoor_data = outdoor_fallback(load_state().get("last_outdoor"), zones.get("outside"))
+        outdoor_stale = True
+        print(f"[warn] Open-Meteo current fetch failed ({e}); using cached/sensor outdoor reading",
+              file=sys.stderr)
+    fresh_outdoor = None if outdoor_stale else dict(outdoor_data)   # pre-sensor-override copy to cache
 
     # Live outdoor temp comes from the physical 'outside' sensor when it reported this
     # run, falling back to Open-Meteo's current-conditions estimate when it didn't. The
@@ -1462,7 +1515,11 @@ def main():
                  "closed_today": False, "reopened_today": False,
                  "last_indoor": state.get("last_indoor"),         # carry over for glitch/rise checks
                  "last_indoor_utc": state.get("last_indoor_utc"),
+                 "last_outdoor": state.get("last_outdoor"),       # Open-Meteo outage fallback
                  "solar_warned_today": False}
+    if fresh_outdoor is not None:
+        state["last_outdoor"] = {"data": fresh_outdoor,
+                                 "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
     # A wild jump from the last good reading is the sensor misfiring — drop it for this
     # cycle and fall back to the model estimate, rather than acting on a phantom value.
@@ -1484,7 +1541,9 @@ def main():
     forecast_hourly = None
     wetbulb_max = wetbulb_peak_hour = None
     rising = False
-    indoor_est = INDOOR_BASE
+    # The live reading must not depend on the forecast: an Open-Meteo outage used to leave
+    # indoor_est at INDOOR_BASE even with the Shelly reporting fine.
+    indoor_est = shelly["temp"] if shelly else INDOOR_BASE
     try:
         forecast = get_forecast()
         current_hour = local_now().hour
@@ -1666,7 +1725,10 @@ def main():
     state["status"] = status
     save_state(state)
     update_dashboard(outdoor, status, indoor_est, forecast_max, forecast_peak_hour, display_close, display_open, forecast_hourly, indoor_humidity_display, indoor_estimated, wetbulb_max, wetbulb_peak_hour, solar_now, solar_threshold, solar_window_threshold, model_rmse, model_samples, thermal, window_regime, model_confirmed, blind_regime, blinds_effect, cal.get("_facade_az"), zones, outdoor_source)
-    log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime, zones, outdoor_source, outdoor_forecast_c)
+    if outdoor_stale:
+        print("History not logged this cycle: outdoor weather is cached, not live.")
+    else:
+        log_history(outdoor_data, indoor_real, indoor_humidity, indoor_battery, status, window_regime, blind_regime, zones, outdoor_source, outdoor_forecast_c)
 
 
 if __name__ == "__main__":
