@@ -27,6 +27,7 @@ import window_watch as ww
 import energy
 import battery_control
 import octopus
+import heatloss
 
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN", "")
 
@@ -142,12 +143,17 @@ schedule.every().day.at("07:30").do(octopus.pull)
 schedule.every(30).minutes.do(octopus.sessions)
 schedule.every(5).minutes.do(octopus.sessions_tick)
 
+# Weekly heat-loss estimate (heatloss.py) from the last 28 days of heating, after the
+# Monday 03:30 Vaillant pull has landed. Sends a summary once there are enough heating days.
+schedule.every().monday.at("08:15").do(heatloss.weekly)
+
 threading.Thread(target=serve, daemon=True).start()
 
 print("Window Watch runner started — checking every 30 min, brief at 08:10, "
       "SolaX every 5 min, Vaillant weekly (Mon 03:30), "
       f"battery balance charge Sun 13:05-15:55 [{battery_control.MODE}], "
-      f"Octopus daily 07:30 + sessions [charge {'on' if octopus.SESSION_CHARGE else 'off'}].")
+      f"Octopus daily 07:30 + sessions [charge {'on' if octopus.SESSION_CHARGE else 'off'}], "
+      "heat loss Mon 08:15.")
 while True:
     schedule.run_pending()
     time.sleep(15)
