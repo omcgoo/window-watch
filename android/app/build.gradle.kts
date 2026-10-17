@@ -12,8 +12,8 @@ android {
         applicationId = "com.omcgoo.windowwatch"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     buildFeatures {
@@ -33,4 +33,7 @@ android {
 dependencies {
     implementation("androidx.glance:glance-appwidget:1.1.1")
     implementation("androidx.core:core-ktx:1.13.1")
+    // Arrives transitively via Glance, but pinned explicitly: the refresh schedule is
+    // load-bearing now, so it should not move because a Glance upgrade moved it.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 }
