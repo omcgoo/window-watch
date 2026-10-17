@@ -49,7 +49,8 @@ readonly EXPECTED_HEADER
 readonly CRITICAL="history.csv"
 readonly OPTIONAL=("calibration.json" "state.json" "window_report.json" "blind_report.json"
                   "solax.csv" "vaillant_hourly.csv" "vaillant_settings.jsonl" "energy_status.json"
-                  "battery_control.json")
+                  "battery_control.json" "octopus_consumption.csv" "octopus_rates.csv"
+                  "octopus_sessions.json")
 
 fail() { echo "[FAIL] $*" >&2; write_last_run "FAILED: $*" "-"; exit 1; }
 warn() { echo "[warn] $*" >&2; }

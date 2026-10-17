@@ -86,7 +86,7 @@ class LifecycleTest(BatteryControlTest):
         self.cmd_status = 5
         self.assertEqual(self.bc.start(), "failed")
         self.assertFalse(os.path.exists(self.bc.STATE_FILE))
-        self.assertTrue(self.notes[0][0].startswith("Battery balance charge didn't"))
+        self.assertTrue(self.notes[0][0].startswith("Battery charge didn't"))
 
     def test_start_watchdog_exit_done(self):
         self.assertEqual(self.bc.start(), "started")
@@ -100,6 +100,17 @@ class LifecycleTest(BatteryControlTest):
         self.clock[0] = sunday(16, 15)
         self.assertEqual(self.bc.watchdog(), "done")
         self.assertEqual(self.state()["peak_soc"], 99)
+
+    def test_custom_end_time_is_honoured(self):
+        self.clock[0] = sunday(20, 0)
+        self.reading()
+        end = sunday(21, 0)
+        self.assertEqual(self.bc.start(force=True, until=end, reason="free electricity"), "started")
+        self.assertEqual(self.state()["end_utc"], end.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.clock[0] = sunday(20, 30)
+        self.assertIsNone(self.bc.watchdog())          # past 16:00 but before its own end
+        self.clock[0] = sunday(21, 0)
+        self.assertEqual(self.bc.watchdog(), "exiting")
 
     def test_stuck_override_three_exits_then_one_high_alert(self):
         self.bc.start()
