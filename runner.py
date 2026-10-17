@@ -25,6 +25,7 @@ os.environ.setdefault("HISTORY_FILE", "/data/history.csv")
 
 import window_watch as ww
 import energy
+import battery_control
 
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN", "")
 
@@ -126,10 +127,18 @@ schedule.every().day.at("08:10").do(morning_brief)
 schedule.every(5).minutes.do(energy.solax_poll)
 schedule.every().monday.at("03:30").do(energy.vaillant_pull)
 
+# Weekly 100% balance charge (battery_control.py): the only job that writes to a device.
+# Gated by BATTERY_CONTROL (off/dryrun/on); the watchdog makes sure the temporary override
+# is gone by the 16:00 peak and alerts if the inverter won't let go.
+schedule.every().sunday.at("13:05").do(battery_control.start)
+schedule.every().sunday.at("15:55").do(battery_control.stop)
+schedule.every(10).minutes.do(battery_control.watchdog)
+
 threading.Thread(target=serve, daemon=True).start()
 
 print("Window Watch runner started — checking every 30 min, brief at 08:10, "
-      "SolaX every 5 min, Vaillant weekly (Mon 03:30).")
+      "SolaX every 5 min, Vaillant weekly (Mon 03:30), "
+      f"battery balance charge Sun 13:05-15:55 [{battery_control.MODE}].")
 while True:
     schedule.run_pending()
     time.sleep(15)
