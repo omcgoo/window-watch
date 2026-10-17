@@ -33,6 +33,10 @@ primary_region = "lhr"
   #                               2026-08-16 ~10:40Z, when it moved to the south window
   #                               (160°, same facade as the lounge). Rows before that
   #                               boundary carry the old key; do not pool the two.
+  # Weekly 100% battery balance charge (battery_control.py): off | dryrun | on.
+  # Stays "dryrun" until a supervised live test shows the X1-Hybrid-LV accepts the
+  # temporary VPP override and returns to Normal when told.
+  BATTERY_CONTROL = "dryrun"
   SWITCHBOT_DEVICES = '{"bedroom":"E873BA8E87E2","outside":"E59004066234","hallway_downstairs":"E49000C62351","south_window":"E49001C6103E","loft":"E59003866417"}'
 
 [[mounts]]
