@@ -22,7 +22,7 @@ class HeatLossTest(EnvTestCase):
         self.hl = self.load("heatloss")
         self.hl._now = lambda: END
 
-    def build(self, n_days, noise=0.0, heating=True):
+    def build(self, n_days, noise=0.0, heating=True, stuck_sensor=None):
         rng = random.Random(7)
         vh = []
         with open(self.path("history.csv"), "w", newline="") as f:
@@ -38,11 +38,12 @@ class HeatLossTest(EnvTestCase):
                 for k in range(48):
                     local = dt.datetime.combine(day, dt.time(0, 0), LOCAL) + dt.timedelta(minutes=30 * k)
                     tin_k = t_in - drift / 2 + drift * k / 47
-                    zones = {"outside": {"t": t_out}, "hallway_downstairs": {"t": tin_k}, "bedroom": {"t": tin_k},
+                    zones = {"outside": {"t": stuck_sensor if stuck_sensor is not None else t_out}, "hallway_downstairs": {"t": tin_k}, "bedroom": {"t": tin_k},
                              "loft": {"t": tin_k - 0.4 * (tin_k - t_out)}}
                     rows.append((local, tin_k))
                     w.writerow([local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), t_out, "", "", "", "", sun, "",
-                                "", tin_k, "", "", "open", "", "", json.dumps(zones), "sensor", ""])
+                                "", tin_k, "", "", "open", "", "", json.dumps(zones), "sensor",
+                                t_out if stuck_sensor is not None else ""])
                 dtin_per_h = (rows[-1][1] - rows[0][1]) / 24.0
                 q = H * (t_in - t_out) - G_SUN * sun - G_INT + C * dtin_per_h
                 q *= 1 + noise * rng.uniform(-1, 1)
@@ -88,3 +89,19 @@ class HeatLossTest(EnvTestCase):
         self.assertEqual(len(notes), 2)
         self.assertIn("100 W/K", notes[0])
         self.assertIn("last week 100", notes[1])
+
+    def test_prefers_logged_weather_feed_over_a_frozen_sensor(self):
+        self.build(21, stuck_sensor=10.0)
+        r = self.hl.estimate(days=28)
+        self.assertEqual(r["status"], "ok")
+        self.assertAlmostEqual(r["H_w_per_k"], H, delta=0.5)
+
+    def test_wide_interval_is_uncertain_and_not_sent(self):
+        notes = []
+        self.hl._notify = lambda title, body: notes.append(body)
+        self.build(12, noise=0.8)
+        r = self.hl.weekly()
+        self.assertEqual(r["status"], "uncertain")
+        self.assertEqual(notes, [])
+        with open(self.en.STATUS_FILE) as f:
+            self.assertIn("not sent", json.load(f)["heatloss"]["last_detail"])

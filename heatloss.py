@@ -10,12 +10,15 @@ Daily energy balance over the last 28 days, using only days the heating actually
 
   Q_heat   mean heat delivered to the radiators (W): Vaillant HEATING / HEAT_GENERATED
   T_in     mean of the indoor sensors (lounge Shelly, hallway, bedroom), °C
-  T_out    outdoor sensor (falls back to the logged Open-Meteo value), °C
+  T_out    Open-Meteo's estimate logged with each row (falls back to the outdoor sensor), °C.
+           One consistent source: the north-wall sensor runs warm and damped, and froze
+           for a week in Oct 2026, which drove the fit to a negative H.
   S        mean horizontal sun, W/m² (free solar gain through the glass)
   G        internal gains: people, appliances, hot-water cylinder losses (fitted constant)
   C        heat capacity, from the day-to-day change in T_in (the flat's slow thermal mass)
 
-H is the answer, with a 90% interval from a day-resampled bootstrap. Pure Python: the
+H is the answer, with a 90% interval from a day-resampled bootstrap. A fit whose interval
+is wider than H itself, or that reaches zero, is reported as "uncertain" and not sent. Pure Python: the
 Fly image carries no numpy.
 
 The loft sensor adds an indicator: overnight on heating days, the share of the indoor-to-
@@ -101,8 +104,11 @@ def daily_climate(since):
                     zones = {}
                 temps = [_f(r.get("indoor_c"))] + [(zones.get(z) or {}).get("t") for z in INDOOR_ZONES]
                 temps = [x for x in temps if x is not None]
-                t_out = (zones.get("outside") or {}).get("t")
-                t_out = t_out if t_out is not None else _f(r.get("outdoor_c"))
+                t_out = _f(r.get("outdoor_forecast_c"))
+                if t_out is None:
+                    t_out = (zones.get("outside") or {}).get("t")
+                if t_out is None:
+                    t_out = _f(r.get("outdoor_c"))
                 if not temps or t_out is None:
                     continue
                 local = t.astimezone(LOCAL)
@@ -194,6 +200,9 @@ def estimate(days=28):
                                   for k, v in f.items()},
                   mean_dT=round(sum(s[1] for s in samples) / len(samples), 1),
                   first_day=str(usable[0]), last_day=str(usable[-1]))
+    lo, hi = result["ci90"]
+    if None in (lo, hi) or result["H_w_per_k"] <= 0 or lo <= 0 or hi - lo > result["H_w_per_k"]:
+        result["status"] = "uncertain"
     return result
 
 
@@ -232,7 +241,10 @@ def weekly(days=28, notify=True):
                 _notify("Heat loss this month", body)
             en._status("heatloss", True, body)
         else:
-            en._status("heatloss", True, f"{r['status']}: {r['heating_days']}/{r['needed_days']} heating days")
+            detail = f"{r['status']}: {r['heating_days']}/{r['needed_days']} heating days"
+            if r["status"] == "uncertain":
+                detail += f", {r['H_w_per_k']:.0f} W/K (90% range {r['ci90'][0]:.0f}–{r['ci90'][1]:.0f}) not sent"
+            en._status("heatloss", True, detail)
         return r
     except Exception as e:
         print(f"[warn] heatloss failed: {e}", file=sys.stderr)
