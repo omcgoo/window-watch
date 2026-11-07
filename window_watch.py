@@ -195,6 +195,10 @@ def get_outdoor():
 
 
 OUTDOOR_CACHE_MAX = timedelta(hours=3)
+# A real outdoor temperature drifts by at least 0.1°C over a few hours; one that hasn't
+# moved in this long is a sensor that stopped updating (it froze at 10.0°C for a week in
+# Oct 2026 while the weather went from 5 to 15°C), so main() stops trusting it.
+OUTSIDE_STUCK_AFTER = timedelta(hours=8)
 
 
 def outdoor_fallback(cached, outside_zone):
@@ -224,6 +228,20 @@ def outdoor_fallback(cached, outside_zone):
     if sensor_rh is not None:
         data["humidity"] = int(sensor_rh)
     return data
+
+
+def track_outside(reading, track, now):
+    """Follow the outside sensor's temperature between runs. Returns (stuck, track), where
+    track is {"t", "since"}: the last value and when it first appeared. stuck is True once
+    that value has held for OUTSIDE_STUCK_AFTER."""
+    t = (reading or {}).get("t")
+    if t is None:
+        return False, track
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not track or track.get("t") != t or not track.get("since"):
+        return False, {"t": t, "since": stamp}
+    since = datetime.strptime(track["since"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return now - since >= OUTSIDE_STUCK_AFTER, track
 
 
 def get_forecast():
@@ -1473,6 +1491,11 @@ def main():
 
     shelly = get_indoor_shelly()
     zones = get_zones()
+    # A frozen outside sensor would otherwise override Open-Meteo indefinitely, so drop it
+    # from this run's zones once its reading stops changing.
+    outside_stuck, outside_track = track_outside(zones.get("outside"), load_state().get("outside_track"),
+                                                 datetime.now(timezone.utc))
+    stuck_reading = zones.pop("outside", None) if outside_stuck else None
     # An Open-Meteo outage used to abort the whole cycle (no advice, no dashboard). Fall
     # back to the last good reading plus the outside sensor; outdoor_stale then keeps
     # this cycle out of history.csv.
@@ -1516,7 +1539,18 @@ def main():
                  "last_indoor": state.get("last_indoor"),         # carry over for glitch/rise checks
                  "last_indoor_utc": state.get("last_indoor_utc"),
                  "last_outdoor": state.get("last_outdoor"),       # Open-Meteo outage fallback
+                 "outside_track": state.get("outside_track"),     # frozen-sensor detection
+                 "outside_stuck_warned": state.get("outside_stuck_warned", False),
                  "solar_warned_today": False}
+    state["outside_track"] = outside_track
+    if outside_stuck and not state.get("outside_stuck_warned"):
+        print(f"[warn] outside sensor stuck at {stuck_reading.get('t')}°C since {outside_track['since']}; "
+              "using Open-Meteo", file=sys.stderr)
+        notify("Outside sensor stuck",
+               f"It has read {stuck_reading.get('t')}°C since {outside_track['since']} UTC. Using the weather "
+               "feed until it changes. Check its screen and batteries.",
+               tags="warning,thermometer", priority="low")
+    state["outside_stuck_warned"] = outside_stuck
     if fresh_outdoor is not None:
         state["last_outdoor"] = {"data": fresh_outdoor,
                                  "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}

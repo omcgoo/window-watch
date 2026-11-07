@@ -14,7 +14,7 @@ def http_503(*a):
     return urllib.error.HTTPError("https://api.open-meteo.com", 503, "Service Unavailable", None, None)
 
 
-class OutdoorFallbackTest(EnvTestCase):
+class MainHarness(EnvTestCase):
     def setUp(self):
         super().setUp()
         w = self.w = self.load("window_watch")
@@ -37,6 +37,8 @@ class OutdoorFallbackTest(EnvTestCase):
         self.w.get_outdoor = outdoor
         self.w.main()
 
+
+class OutdoorFallbackTest(MainHarness):
     def test_live_indoor_reading_used_when_forecast_fails(self):
         self.run_main(lambda: dict(GOOD))
         self.assertEqual(self.dash[-1][2], 20.5)
@@ -84,3 +86,39 @@ class OutdoorFallbackTest(EnvTestCase):
         with self.assertRaises(urllib.error.HTTPError):
             self.real_get_outdoor()
         self.assertEqual(len(self.http.calls), 2)
+
+
+class StuckOutsideSensorTest(MainHarness):
+    def seed(self, t, since):
+        with open(self.path("state.json"), "w") as f:
+            json.dump({"day": "2000-01-01", "outside_track": {"t": t, "since": since}}, f)
+
+    def test_unchanged_reading_is_trusted_for_a_while(self):
+        stuck, track = self.w.track_outside({"t": 10.0}, {"t": 10.0, "since": "2026-11-07T00:00:00Z"},
+                                            self.w.datetime(2026, 11, 7, 7, 59, tzinfo=self.w.timezone.utc))
+        self.assertFalse(stuck)
+        self.assertEqual(track["since"], "2026-11-07T00:00:00Z")
+
+    def test_change_restarts_the_clock(self):
+        stuck, track = self.w.track_outside({"t": 9.9}, {"t": 10.0, "since": "2020-01-01T00:00:00Z"},
+                                            self.w.datetime(2026, 11, 7, 8, 0, tzinfo=self.w.timezone.utc))
+        self.assertFalse(stuck)
+        self.assertEqual(track, {"t": 9.9, "since": "2026-11-07T08:00:00Z"})
+
+    def test_frozen_sensor_falls_back_to_open_meteo_and_warns_once(self):
+        notes = []
+        self.w.notify = lambda title, *a, **k: notes.append(title)
+        self.seed(11.2, "2020-01-01T00:00:00Z")
+        self.run_main(lambda: dict(GOOD))
+        self.run_main(lambda: dict(GOOD))
+        self.assertEqual(self.logged[-1]["temp"], 10.0)
+        self.assertEqual(notes.count("Outside sensor stuck"), 1)
+        self.assertEqual(self.state()["outside_track"]["since"], "2020-01-01T00:00:00Z")
+
+    def test_recovered_sensor_is_used_again(self):
+        self.seed(11.2, "2020-01-01T00:00:00Z")
+        self.run_main(lambda: dict(GOOD))
+        self.zones["outside"]["t"] = 11.4
+        self.run_main(lambda: dict(GOOD))
+        self.assertEqual(self.logged[-1]["temp"], 11.4)
+        self.assertFalse(self.state()["outside_stuck_warned"])
