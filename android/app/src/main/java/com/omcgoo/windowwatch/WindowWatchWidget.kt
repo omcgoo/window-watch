@@ -33,8 +33,6 @@ import androidx.glance.text.Text
 import androidx.glance.text.TextAlign
 import androidx.glance.text.TextStyle
 import androidx.glance.unit.ColorProvider
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 private data class Theme(val bg: Color, val accent: Color, val label: String, val hint: String)
 
@@ -57,13 +55,34 @@ class WindowWatchWidget : GlanceAppWidget() {
     override val sizeMode = SizeMode.Responsive(setOf(COMPACT, TALL))
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val data = withContext(Dispatchers.IO) { fetchStatus(context) }
-        provideContent { WidgetBody(data) }
+        // Cache only, no network: see readCached. RefreshWorker keeps it current.
+        provideContent { WidgetBody(readCached(context)) }
     }
 }
 
 class WindowWatchReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = WindowWatchWidget()
+
+    /** First widget placed — start the schedule and populate it straight away. */
+    override fun onEnabled(context: Context) {
+        super.onEnabled(context)
+        ensureFresh(context)
+    }
+
+    /**
+     * Also schedule on every update broadcast. enqueueUniquePeriodicWork with KEEP makes this
+     * a no-op when the schedule is already healthy, and it is what heals the case that
+     * matters: work dropped after a force-stop, where onEnabled will never fire again
+     * because the widget is already on the home screen.
+     */
+    override fun onUpdate(
+        context: Context,
+        appWidgetManager: android.appwidget.AppWidgetManager,
+        appWidgetIds: IntArray,
+    ) {
+        super.onUpdate(context, appWidgetManager, appWidgetIds)
+        ensureFresh(context)
+    }
 }
 
 @Composable
@@ -87,8 +106,9 @@ private fun WidgetBody(data: Status?) {
 }
 
 /**
- * 4x1. Only two lines fit, so it drops the hint and the "updated" age and keeps what
- * actually drives a decision: the verdict, the two temperatures, and what's coming.
+ * 4x1. Only two lines fit, so it drops the hint line and keeps what actually drives a
+ * decision: the verdict, the two temperatures, and either what's coming or — when the
+ * payload has gone stale — how old it is.
  */
 @Composable
 private fun RowScope.CompactContent(theme: Theme, data: Status?) {
@@ -109,11 +129,20 @@ private fun RowScope.CompactContent(theme: Theme, data: Status?) {
                 color = WHITE_STRONG, textAlign = TextAlign.End),
             maxLines = 1,
         )
-        forecastLine(data)?.let {
+        // Only two lines fit, so the second one earns its place: normally the forecast,
+        // but once the payload is stale the forecast is describing a day that has moved on,
+        // and the honest thing to show is how old the numbers are.
+        val stale = isStale(data?.updatedUtc)
+        val second = if (stale) "Updated ${timeAgo(data?.updatedUtc)}" else forecastLine(data)
+        second?.let {
             Spacer(GlanceModifier.height(2.dp))
             Text(
                 text = it,
-                style = TextStyle(fontSize = 11.sp, color = AMBER, textAlign = TextAlign.End),
+                style = TextStyle(
+                    fontSize = 11.sp,
+                    color = if (stale) WHITE_FAINT else AMBER,
+                    textAlign = TextAlign.End,
+                ),
                 maxLines = 1,
             )
         }
